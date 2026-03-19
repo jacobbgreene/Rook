@@ -259,9 +259,13 @@ function App() {
     setEngineThoughts({});
     setEvaluation("");
     setCoachMessage("");
-    const check = new Chess(fen);
-    if (engineRef.current && !check.isGameOver()) {
-      engineRef.current.evaluatePosition(fen);
+    if (engineRef.current) {
+      const check = new Chess(fen);
+      if (!check.isGameOver()) {
+        engineRef.current.evaluatePosition(fen);
+      } else {
+        engineRef.current.stop();
+      }
     }
   };
 
