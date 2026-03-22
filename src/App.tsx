@@ -237,6 +237,7 @@ function App() {
             msgGen === analysisGenRef.current
           ) {
             widenedRef.current = true;
+            setEngineThoughts({});
             engineRef.current?.widenSearch(currentFenRef.current);
           }
         }
@@ -481,23 +482,37 @@ function App() {
     }
   };
 
+  const parseScore = (s: string): number => {
+    if (s.startsWith("M")) {
+      const n = parseInt(s.slice(1), 10);
+      return n < 0 ? -100 : 100;
+    }
+    return parseFloat(s) || 0;
+  };
+
   const bestMoveArrows = Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
     .slice(0, 5)
-    .map((thought) => {
+    .reduce<Arrow[]>((arrows, thought) => {
       const move = thought.rawFirstMove;
-      if (!move || move.length < 4) return null;
+      if (!move || move.length < 4) return arrows;
+      const startSquare = move.slice(0, 2);
+      const endSquare = move.slice(2, 4);
+      // Skip if an arrow for this square pair already exists (higher-ranked line wins)
+      if (arrows.some((a) => a.startSquare === startSquare && a.endSquare === endSquare))
+        return arrows;
+      const bestLine = Object.values(engineThoughts).find((t) => t.multipv === 1);
+      const bestScore = bestLine ? parseScore(bestLine.score) : 0;
+      const lineScore = parseScore(thought.score);
+      const isBlunder = thought.multipv !== 1 && bestScore > 1.0 && lineScore < 0;
       let color = "rgba(128, 128, 128, 0.4)";
-      if (thought.multipv === 1) color = "rgba(50, 205, 50, 0.8)";
+      if (isBlunder) color = "rgba(255, 80, 80, 0.7)";
+      else if (thought.multipv === 1) color = "rgba(50, 205, 50, 0.8)";
       else if (thought.multipv === 2) color = "rgba(30, 144, 255, 0.6)";
       else if (thought.multipv === 3) color = "rgba(255, 165, 0, 0.6)";
-      return {
-        startSquare: move.slice(0, 2),
-        endSquare: move.slice(2, 4),
-        color,
-      };
-    })
-    .filter(Boolean) as Arrow[];
+      arrows.push({ startSquare, endSquare, color });
+      return arrows;
+    }, []).reverse();
 
   const displayThoughts = Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
@@ -528,8 +543,8 @@ function App() {
   };
 
   const getEvalInfo = () => {
-    if (!evaluation)
-      return { percent: 50, label: "Calculating...", labelColor: "#fff" };
+    if (!evaluation || currentMoveIndex === 0)
+      return { percent: 50, label: "", labelColor: "#fff" };
     const isBlackTurn = game.turn() === "b";
     let evalFromWhite: number;
     let isMate = false;
@@ -569,7 +584,7 @@ function App() {
 
   const evalInfo = getEvalInfo();
 
-  const getLineStyle = (multipv: number) => {
+  const getLineStyle = (multipv: number | "red") => {
     switch (multipv) {
       case 1:
         return {
@@ -591,6 +606,13 @@ function App() {
           border: "#5c3c1a",
           text: "#ffb067",
           chipBg: "#2b1d11",
+        };
+      case "red":
+        return {
+          bg: "#3c1a1a",
+          border: "#5c2a2a",
+          text: "#ff6b6b",
+          chipBg: "#2b1111",
         };
       default:
         return { bg: "#222", border: "#333", text: "#aaa", chipBg: "#111" };
@@ -636,7 +658,7 @@ function App() {
               options={{
                 position: game.fen(),
                 onPieceDrop: onDrop,
-                arrows: bestMoveArrows,
+                arrows: currentMoveIndex === 0 ? [] : bestMoveArrows,
                 boardOrientation: boardOrientation,
               }}
             />
@@ -803,7 +825,20 @@ function App() {
               )}
 
               {displayThoughts.map((thought) => {
-                const style = getLineStyle(thought.multipv);
+                const lineScore = parseScore(thought.score);
+                const bestLine = displayThoughts.find(
+                  (t) => t.multipv === 1
+                );
+                const bestScore = bestLine
+                  ? parseScore(bestLine.score)
+                  : 0;
+                const isBlunder =
+                  thought.multipv !== 1 &&
+                  bestScore > 1.0 &&
+                  lineScore < 0;
+                const style = getLineStyle(
+                  isBlunder ? "red" : thought.multipv
+                );
                 const sanMoves = uciMovesToSan(thought.moves);
                 return (
                   <div
