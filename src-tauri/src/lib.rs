@@ -21,6 +21,133 @@ struct MoveAnnotation {
     comment: String,
 }
 
+// ── Context-Injection Pipeline types ──────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CriticalMomentData {
+    fen: String,
+    move_san: String,
+    move_number: u32,
+    side: String,
+    eval_before: f64,
+    eval_after: f64,
+    eval_drop: f64,
+    category: String,
+    best_move_san: String,
+    best_line: Vec<String>,
+}
+
+fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> String {
+    let category_desc = match m.category.as_str() {
+        "blunder" => "a serious blunder",
+        "mistake" => "a significant mistake",
+        "inaccuracy" => "an inaccuracy",
+        "turning_point" => "a critical turning point",
+        _ => "a notable moment",
+    };
+
+    let is_player_move = m.side == perspective;
+    let opponent = if perspective == "white" { "black" } else { "white" };
+
+    if is_player_move {
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num})\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            Evaluation drop: {drop:.1} pawns — classified as {cat}\n\
+            Stockfish's preferred move: {best}\n\
+            Stockfish's top line: {line}\n\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Why your move {san} was {cat} — what tactical or strategic principle was violated.\n\
+            2. What you should have played instead ({best}) and the key idea behind that continuation.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            drop = m.eval_drop,
+            cat = category_desc,
+            best = m.best_move_san,
+            line = m.best_line.join(" "),
+        )
+    } else {
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            Your opponent ({opponent}) played: {san} (Move {num})\n\
+            This was {cat} by your opponent — evaluation before: {eb:+.2}, after: {ea:+.2} (drop: {drop:.1} pawns)\n\
+            Stockfish's preferred move for the opponent was: {best}\n\
+            Stockfish's top line: {line}\n\n\
+            In 2-3 concise sentences, explain to the {perspective} player:\n\
+            1. Why the opponent's move {san} was {cat} and what opportunity it created for you.\n\
+            2. How you should look to exploit this type of mistake — what continuation or idea should you be alert for?\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            opponent = opponent,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            drop = m.eval_drop,
+            cat = category_desc,
+            best = m.best_move_san,
+            line = m.best_line.join(" "),
+        )
+    }
+}
+
+fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str) -> String {
+    let opponent = if perspective == "white" { "black" } else { "white" };
+
+    let mut prompt = format!(
+        "You are a chess coach providing a targeted post-game summary for the {perspective} player.\n\n\
+        The following critical moments were identified:\n\n",
+        perspective = perspective
+    );
+
+    for m in moments {
+        let whose = if m.side == perspective {
+            "Your move".to_string()
+        } else {
+            format!("Opponent's ({}) move", opponent)
+        };
+        prompt += &format!(
+            "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.\n",
+            m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop,
+        );
+    }
+
+    prompt += &format!(
+        "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
+        - Identify your most common types of errors and recurring patterns\n\
+        - Note if you missed opportunities to capitalize on your opponent's mistakes\n\
+        - Suggest one specific, actionable area to focus on for improvement\n\
+        Address the player directly as \"you\".",
+        perspective
+    );
+
+    prompt
+}
+
+// ── Key resolution helper ────────────────────────────────────
+
+fn resolve_api_keys(state: &Mutex<ApiKeys>) -> Result<(String, String), String> {
+    let keys = state.lock().map_err(|e| e.to_string())?;
+    let gemini = keys.gemini_api_key.clone().unwrap_or_default();
+    let openai = keys.openai_api_key.clone().unwrap_or_default();
+    let gemini = if gemini.is_empty() { env::var("GEMINI_API_KEY").unwrap_or_default() } else { gemini };
+    let openai = if openai.is_empty() { env::var("OPENAI_API_KEY").unwrap_or_default() } else { openai };
+    Ok((gemini, openai))
+}
+
+// ── Persistence ──────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ApiKeys {
     gemini_api_key: Option<String>,
@@ -31,6 +158,65 @@ struct ApiKeys {
 
 struct AppState {
     api_keys: Mutex<ApiKeys>,
+}
+
+// ── Report Persistence ───────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedReport {
+    id: String,
+    game_hash: String,
+    created_at: String,
+    perspective: String,
+    move_count: u32,
+    opening_moves: String,
+    report: GameAnalysisReportData,
+    game_history: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameAnalysisReportData {
+    critical_moments: Vec<CriticalMomentFull>,
+    thematic_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CriticalMomentFull {
+    fen: String,
+    move_san: String,
+    move_number: u32,
+    side: String,
+    eval_before: f64,
+    eval_after: f64,
+    eval_drop: f64,
+    category: String,
+    best_move_san: String,
+    best_line: Vec<String>,
+    llm_explanation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedReportMeta {
+    id: String,
+    game_hash: String,
+    created_at: String,
+    perspective: String,
+    move_count: u32,
+    opening_moves: String,
+    critical_moment_count: u32,
+}
+
+fn get_reports_dir(app: &tauri::AppHandle) -> PathBuf {
+    app.path().app_data_dir().unwrap().join("reports")
+}
+
+fn ensure_reports_dir(app: &tauri::AppHandle) {
+    let dir = get_reports_dir(app);
+    let _ = fs::create_dir_all(&dir);
 }
 
 #[derive(Debug, Serialize)]
@@ -265,6 +451,169 @@ async fn deep_analysis(
         .map_err(|e| format!("Failed to serialize annotations: {}", e))
 }
 
+// ── Context-Injection Pipeline commands ───────────────────────
+
+#[tauri::command]
+async fn explain_critical_moment(
+    moment: CriticalMomentData,
+    perspective: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let (gemini_key, openai_key) = resolve_api_keys(&state.api_keys)?;
+
+    if gemini_key.is_empty() && openai_key.is_empty() {
+        return Err("No API key configured.".to_string());
+    }
+
+    let prompt = build_critical_moment_prompt(&moment, &perspective);
+    let preamble = "You are a grandmaster-level chess coach. Explain critical moments concisely, focusing on the tactical and strategic reasons behind evaluation swings.";
+
+    if !gemini_key.is_empty() {
+        let client = gemini::Client::new(&gemini_key).unwrap();
+        let agent = client.agent("gemini-3-flash-preview")
+            .preamble(preamble)
+            .build();
+        agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
+    } else {
+        let client = openai::Client::new(&openai_key).unwrap();
+        let agent = client.agent(openai::GPT_4O)
+            .preamble(preamble)
+            .build();
+        agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
+    }
+}
+
+#[tauri::command]
+async fn generate_thematic_summary(
+    moments: Vec<CriticalMomentData>,
+    perspective: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let (gemini_key, openai_key) = resolve_api_keys(&state.api_keys)?;
+
+    if gemini_key.is_empty() && openai_key.is_empty() {
+        return Err("No API key configured.".to_string());
+    }
+
+    let prompt = build_thematic_summary_prompt(&moments, &perspective);
+    let preamble = "You are a chess coach writing a concise post-game summary. Focus on actionable patterns the player can improve.";
+
+    if !gemini_key.is_empty() {
+        let client = gemini::Client::new(&gemini_key).unwrap();
+        let agent = client.agent("gemini-3-flash-preview")
+            .preamble(preamble)
+            .build();
+        agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
+    } else {
+        let client = openai::Client::new(&openai_key).unwrap();
+        let agent = client.agent(openai::GPT_4O)
+            .preamble(preamble)
+            .build();
+        agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
+    }
+}
+
+// ── Report Persistence Commands ───────────────────────────────
+
+#[tauri::command]
+fn save_report(report: SavedReport, app: tauri::AppHandle) -> Result<(), String> {
+    ensure_reports_dir(&app);
+    let path = get_reports_dir(&app).join(format!("{}.json", report.id));
+    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
+    ensure_reports_dir(&app);
+    let dir = get_reports_dir(&app);
+    let mut reports: Vec<SavedReportMeta> = Vec::new();
+
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let report: SavedReport = match serde_json::from_str(&contents) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        reports.push(SavedReportMeta {
+            id: report.id,
+            game_hash: report.game_hash,
+            created_at: report.created_at,
+            perspective: report.perspective,
+            move_count: report.move_count,
+            opening_moves: report.opening_moves,
+            critical_moment_count: report.report.critical_moments.len() as u32,
+        });
+    }
+
+    reports.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(reports)
+}
+
+#[tauri::command]
+fn load_report(id: String, app: tauri::AppHandle) -> Result<SavedReport, String> {
+    let path = get_reports_dir(&app).join(format!("{}.json", id));
+    let contents = fs::read_to_string(&path).map_err(|e| format!("Report not found: {}", e))?;
+    serde_json::from_str(&contents).map_err(|e| format!("Failed to parse report: {}", e))
+}
+
+#[tauri::command]
+fn delete_report(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    let path = get_reports_dir(&app).join(format!("{}.json", id));
+    fs::remove_file(&path).map_err(|e| format!("Failed to delete report: {}", e))
+}
+
+#[tauri::command]
+fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Option<SavedReportMeta>, String> {
+    ensure_reports_dir(&app);
+    let dir = get_reports_dir(&app);
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let report: SavedReport = match serde_json::from_str(&contents) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if report.game_hash == game_hash {
+            return Ok(Some(SavedReportMeta {
+                id: report.id,
+                game_hash: report.game_hash,
+                created_at: report.created_at,
+                perspective: report.perspective,
+                move_count: report.move_count,
+                opening_moves: report.opening_moves,
+                critical_moment_count: report.report.critical_moments.len() as u32,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -284,6 +633,13 @@ pub fn run() {
             save_api_key,
             remove_api_key,
             set_gemini_pro,
+            explain_critical_moment,
+            generate_thematic_summary,
+            save_report,
+            list_reports,
+            load_report,
+            delete_report,
+            check_report_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
