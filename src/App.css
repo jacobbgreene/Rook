@@ -611,6 +611,26 @@ button {
   font-family: monospace;
 }
 
+.best-line-move {
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid #444;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.best-line-move:hover {
+  background-color: rgba(122, 179, 255, 0.15);
+  color: #7ab3ff;
+  border-color: rgba(122, 179, 255, 0.4);
+}
+
+.best-line-arrow {
+  color: #555;
+  font-size: 0.7rem;
+  margin: 0 2px;
+}
+
 .cm-explanation {
   font-size: 0.83rem;
   color: #bbb;

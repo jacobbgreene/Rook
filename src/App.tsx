@@ -790,6 +790,13 @@ function App() {
     setImportInput("");
     setActiveTab("strategize");
     setDeepAnalysisAnnotations(null);
+    setPostGameReport(null);
+    setMainLineHistory(null);
+    setShowReportSetup(false);
+    setIncludeGreatMoves(false);
+    setAnalysisDepth(12);
+    setSavedReportId(null);
+    setSavedReportMeta(null);
   };
 
   const playLineToMove = (moves: any[], targetIndex: number) => {
@@ -819,6 +826,36 @@ function App() {
           break;
         }
       } catch (e) {
+        break;
+      }
+    }
+
+    if (newHistory.length > baseHistory.length) {
+      startAnalysis(gameCopy.fen());
+      setGame(gameCopy);
+      setGameHistory(newHistory);
+      setCurrentMoveIndex(newHistory.length - 1);
+    }
+  };
+
+  const playBestLine = (fen: string, sanMoves: string[], targetIndex: number) => {
+    const gameCopy = new Chess(fen);
+    const historyIndex = gameHistory.indexOf(fen);
+    const baseHistory = historyIndex >= 0
+      ? gameHistory.slice(0, historyIndex + 1)
+      : [...gameHistory, fen];
+
+    const newHistory = [...baseHistory];
+
+    for (let i = 0; i <= targetIndex; i++) {
+      try {
+        const result = gameCopy.move(sanMoves[i]);
+        if (result) {
+          newHistory.push(gameCopy.fen());
+        } else {
+          break;
+        }
+      } catch {
         break;
       }
     }
@@ -1305,9 +1342,20 @@ function App() {
                 {moment.category === "great_move" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
               </span>
             </div>
-            {moment.category !== "great_move" && (
-            <div className="cm-best-line">
-              Best: <strong>{moment.bestMoveSan}</strong>{moment.bestLine.length > 1 && ` → ${moment.bestLine.slice(1).join(" ")}`}
+            {moment.category !== "great_move" && moment.bestLine.length > 0 && (
+            <div className="cm-best-line" onClick={(e) => e.stopPropagation()}>
+              Best:{" "}
+              {moment.bestLine.map((san, idx) => (
+                <span key={idx}>
+                  {idx > 0 && <span className="best-line-arrow">→</span>}
+                  <span
+                    className="best-line-move"
+                    onClick={() => playBestLine(moment.fen, moment.bestLine, idx)}
+                  >
+                    {san}
+                  </span>
+                </span>
+              ))}
             </div>
             )}
             <div className="cm-explanation"><ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown></div>
