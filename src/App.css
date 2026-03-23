@@ -221,3 +221,263 @@ button {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
+.deep-analysis-comment {
+  display: block;
+  margin: 4px 0 6px 0;
+  padding: 6px 10px;
+  background-color: rgba(122, 179, 255, 0.08);
+  border-left: 3px solid #7ab3ff;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.85rem;
+  font-style: italic;
+  color: #aac8e8;
+  line-height: 1.4;
+}
+
+/* API Key Settings */
+.settings-button {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #888 !important;
+  cursor: pointer;
+  padding: 4px !important;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s ease !important;
+}
+
+.settings-button:hover {
+  color: #fff !important;
+}
+
+.api-key-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.api-key-modal {
+  background-color: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 12px;
+  padding: 24px;
+  width: 450px;
+  max-width: 90vw;
+  color: #eee;
+}
+
+.api-key-modal h2 {
+  margin: 0 0 20px 0;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.api-key-modal h4 {
+  margin: 0 0 8px 0;
+  font-size: 0.9rem;
+  color: #ccc;
+}
+
+.api-key-modal-close {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #888 !important;
+  cursor: pointer;
+  padding: 4px !important;
+  font-size: 1.2rem;
+  line-height: 1;
+  transition: color 0.2s ease !important;
+}
+
+.api-key-modal-close:hover {
+  color: #fff !important;
+}
+
+.api-key-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #222;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.api-key-input-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.api-key-input-group input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #444 !important;
+  background-color: #2a2a2a !important;
+  color: #eee !important;
+  font-size: 0.85rem;
+  box-shadow: none !important;
+}
+
+.api-key-input-group button {
+  flex: none;
+  padding: 8px 14px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  background-color: #1a1a1a !important;
+  color: #eee !important;
+  border: 1px solid #444 !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  transition: all 0.2s ease !important;
+}
+
+.api-key-input-group button:hover {
+  background-color: #2a2a2a !important;
+  border-color: #666 !important;
+}
+
+.api-key-saved {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.api-key-saved .key-hint {
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: #8fbc8f;
+}
+
+.api-key-saved button {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  background-color: #3c1a1a !important;
+  color: #ff6b6b !important;
+  border: 1px solid #5c2a2a !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  transition: all 0.2s ease !important;
+}
+
+.api-key-saved button:hover {
+  background-color: #4c2020 !important;
+  border-color: #7c3a3a !important;
+}
+
+.eye-toggle {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #888 !important;
+  cursor: pointer;
+  padding: 4px !important;
+  display: flex;
+  align-items: center;
+}
+
+.eye-toggle:hover {
+  color: #ccc !important;
+}
+
+.api-key-info {
+  margin-top: 16px;
+  padding: 10px 14px;
+  background-color: rgba(122, 179, 255, 0.08);
+  border-left: 3px solid #7ab3ff;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.82rem;
+  color: #aac8e8;
+  line-height: 1.5;
+}
+
+.premium-star {
+  color: #ffd700;
+  margin-left: 4px;
+  font-size: 0.75rem;
+}
+
+/* Model toggle row */
+.model-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #222;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.model-toggle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-toggle-title {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: #ddd;
+}
+
+.model-toggle-desc {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+/* Toggle switch */
+.toggle-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background-color: #444 !important;
+  border: none !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  padding: 0 !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.toggle-switch:hover {
+  background-color: #555 !important;
+}
+
+.toggle-switch.toggle-on {
+  background-color: #4a8eff !important;
+}
+
+.toggle-switch.toggle-on:hover {
+  background-color: #5a9aff !important;
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background-color: #fff;
+  transition: transform 0.2s ease;
+  pointer-events: none;
+}
+
+.toggle-switch.toggle-on .toggle-knob {
+  transform: translateX(18px);
+}
