@@ -641,6 +641,18 @@ function App() {
     try {
       const result = gameCopy.move(move);
       if (result) {
+        // Check if this move matches the first move of a best line suggestion
+        const currentFen = game.fen();
+        if (postGameReport && activeTab === "report") {
+          const matchingMoment = postGameReport.criticalMoments.find(
+            (m) => m.fen === currentFen && m.bestLine.length > 0 && m.bestLine[0] === result.san
+          );
+          if (matchingMoment) {
+            playBestLine(currentFen, matchingMoment.bestLine, 0);
+            return true;
+          }
+        }
+
         const newFen = gameCopy.fen();
         startAnalysis(newFen);
         setGame(gameCopy);
@@ -839,19 +851,19 @@ function App() {
   };
 
   const playBestLine = (fen: string, sanMoves: string[], targetIndex: number) => {
-    const gameCopy = new Chess(fen);
     const historyIndex = gameHistory.indexOf(fen);
     const baseHistory = historyIndex >= 0
       ? gameHistory.slice(0, historyIndex + 1)
       : [...gameHistory, fen];
 
+    // Play ALL moves in the best line so Forward/Back can step through them
+    const fullGame = new Chess(fen);
     const newHistory = [...baseHistory];
-
-    for (let i = 0; i <= targetIndex; i++) {
+    for (let i = 0; i < sanMoves.length; i++) {
       try {
-        const result = gameCopy.move(sanMoves[i]);
+        const result = fullGame.move(sanMoves[i]);
         if (result) {
-          newHistory.push(gameCopy.fen());
+          newHistory.push(fullGame.fen());
         } else {
           break;
         }
@@ -861,10 +873,14 @@ function App() {
     }
 
     if (newHistory.length > baseHistory.length) {
-      startAnalysis(gameCopy.fen());
-      setGame(gameCopy);
+      // Navigate to the clicked move, not the end
+      const navIndex = baseHistory.length + targetIndex;
+      const clampedIndex = Math.min(navIndex, newHistory.length - 1);
+      const navGame = new Chess(newHistory[clampedIndex]);
+      startAnalysis(newHistory[clampedIndex]);
+      setGame(navGame);
       setGameHistory(newHistory);
-      setCurrentMoveIndex(newHistory.length - 1);
+      setCurrentMoveIndex(clampedIndex);
     }
   };
 
@@ -1342,22 +1358,30 @@ function App() {
                 {moment.category === "great_move" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
               </span>
             </div>
-            {moment.category !== "great_move" && moment.bestLine.length > 0 && (
-            <div className="cm-best-line" onClick={(e) => e.stopPropagation()}>
-              Best:{" "}
-              {moment.bestLine.map((san, idx) => (
-                <span key={idx}>
-                  {idx > 0 && <span className="best-line-arrow">→</span>}
-                  <span
-                    className="best-line-move"
-                    onClick={() => playBestLine(moment.fen, moment.bestLine, idx)}
-                  >
-                    {san}
-                  </span>
-                </span>
-              ))}
-            </div>
-            )}
+            {moment.category !== "great_move" && moment.bestLine.length > 0 && (() => {
+              const fenIdx = gameHistory.indexOf(moment.fen);
+              const activeBestLineIdx = fenIdx >= 0 && isExploringVariation
+                ? currentMoveIndex - fenIdx - 1
+                : -1;
+              return (
+              <div className="cm-best-line" onClick={(e) => e.stopPropagation()}>
+                <span>Best:</span>
+                {moment.bestLine.map((san, idx) => {
+                  return (
+                    <span key={idx} style={{ display: "contents" }}>
+                      {idx > 0 && <span className="best-line-arrow">→</span>}
+                      <span
+                        className={`best-line-move${idx === activeBestLineIdx ? " best-line-active" : ""}`}
+                        onClick={() => playBestLine(moment.fen, moment.bestLine, idx)}
+                      >
+                        {san}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+              );
+            })()}
             <div className="cm-explanation"><ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown></div>
           </div>
         );
@@ -1471,6 +1495,12 @@ function App() {
               <ResetIcon /> Reset
             </button>
           </div>
+
+          {isExploringVariation && (
+            <button className="back-to-main-btn" onClick={backToMainLine}>
+              ← Back to main line
+            </button>
+          )}
 
           {/* Import Game Field */}
           <div
@@ -1795,11 +1825,6 @@ function App() {
                     </div>
                   ) : postGameReport ? (
                     <div className="report-content">
-                      {isExploringVariation && (
-                        <button className="back-to-main-btn" onClick={backToMainLine}>
-                          ← Back to main line
-                        </button>
-                      )}
                       <div className="report-summary"><ReactMarkdown>{stripLatex(postGameReport.thematicSummary)}</ReactMarkdown></div>
                       {renderReportMoves()}
                       {postGameReport.criticalMoments.filter(m => m.side === reportPerspective).length === 0 && (

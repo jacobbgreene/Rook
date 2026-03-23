@@ -609,13 +609,21 @@ button {
   font-size: 0.78rem;
   color: #888;
   font-family: monospace;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
 }
 
 .best-line-move {
   cursor: pointer;
-  padding: 1px 5px;
+  padding: 2px 6px;
   border-radius: 3px;
-  border: 1px solid #444;
+  border: 1px solid #3a3a3a;
+  background-color: rgba(255, 255, 255, 0.03);
+  color: #999;
+  white-space: nowrap;
+  line-height: 1.4;
   transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
@@ -625,10 +633,15 @@ button {
   border-color: rgba(122, 179, 255, 0.4);
 }
 
+.best-line-active {
+  background-color: rgba(122, 179, 255, 0.2) !important;
+  color: #7ab3ff !important;
+  border-color: rgba(122, 179, 255, 0.5) !important;
+}
+
 .best-line-arrow {
-  color: #555;
-  font-size: 0.7rem;
-  margin: 0 2px;
+  color: #444;
+  font-size: 0.65rem;
 }
 
 .cm-explanation {
@@ -748,7 +761,7 @@ button {
   gap: 6px;
   width: 100%;
   padding: 8px 12px !important;
-  margin-bottom: 10px;
+  margin-top: 6px;
   font-size: 0.82rem !important;
   border-radius: 6px !important;
   background-color: rgba(80, 180, 255, 0.1) !important;
