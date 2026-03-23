@@ -25,7 +25,7 @@ export interface CriticalMoment {
   evalBefore: number; // pawns, from white's perspective
   evalAfter: number;
   evalDrop: number; // positive = player worsened their position
-  category: "blunder" | "mistake" | "inaccuracy" | "turning_point";
+  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move";
   bestMoveSan: string;
   bestLine: string[];
 }
@@ -49,6 +49,8 @@ export type AnalysisPhase =
 // Saved Report Types
 // ═══════════════════════════════════════════════════════════════
 
+export type GameResult = "win" | "loss" | "draw" | "unknown";
+
 export interface SavedReport {
   id: string;
   gameHash: string;
@@ -56,6 +58,7 @@ export interface SavedReport {
   perspective: "white" | "black";
   moveCount: number;
   openingMoves: string;
+  result: GameResult;
   report: GameAnalysisReport;
   gameHistory: string[];
 }
@@ -68,6 +71,7 @@ export interface SavedReportMeta {
   moveCount: number;
   openingMoves: string;
   criticalMomentCount: number;
+  result: GameResult;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -86,6 +90,26 @@ export function computeGameHash(positions: string[]): string {
     hash = ((hash << 5) + hash + normalized.charCodeAt(i)) | 0;
   }
   return (hash >>> 0).toString(16);
+}
+
+/** Determine the game result from the perspective of the given side. */
+export function determineGameResult(gameHistory: string[], perspective: string): GameResult {
+  if (gameHistory.length <= 1) return "unknown";
+  const finalFen = gameHistory[gameHistory.length - 1];
+  const game = new Chess(finalFen);
+
+  if (game.isCheckmate()) {
+    // Side to move is mated, so the other side won
+    const loserIsWhite = game.turn() === "w";
+    const winnerIsWhite = !loserIsWhite;
+    return (perspective === "white") === winnerIsWhite ? "win" : "loss";
+  }
+  if (game.isDraw() || game.isStalemate()) {
+    return "draw";
+  }
+  // Game didn't end in a terminal position (e.g. resignation, or game still in progress).
+  // Use the final evaluation heuristic: check the last eval if available, otherwise unknown.
+  return "unknown";
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -262,6 +286,7 @@ export function filterCriticalMoments(
   positions: string[],
   moves: string[],
   evaluations: PositionEval[],
+  includeGreatMoves: boolean = false,
 ): CriticalMoment[] {
   const moments: CriticalMoment[] = [];
 
@@ -295,6 +320,25 @@ export function filterCriticalMoments(
     else if (evalDrop > 3.0) category = "blunder";
     else if (evalDrop > 1.5) category = "mistake";
     else if (evalDrop > 0.75) category = "inaccuracy";
+
+    // Great move: the player's position improved significantly over the last
+    // two half-moves (opponent's move + player's response) and the player
+    // didn't squander the opportunity (their own evalDrop is small).
+    // This catches moves where the player correctly punished an opponent error.
+    if (!category && includeGreatMoves && i >= 1 && evalDrop <= 0.3) {
+      const evalTwoPliesAgo = evaluations[i - 1];
+      if (evalTwoPliesAgo) {
+        const prevTurn = !isWhiteTurn; // who moved two plies ago (the opponent)
+        const normTwoPliesAgo = toWhitePerspective(rawScore(evalTwoPliesAgo), prevTurn);
+        // Eval gain from the player's perspective over the two half-moves
+        const pairGain = isWhiteTurn
+          ? (normAfter - normTwoPliesAgo) / 100
+          : (normTwoPliesAgo - normAfter) / 100;
+        if (pairGain >= 1.0) {
+          category = "great_move";
+        }
+      }
+    }
 
     if (!category) continue;
 
@@ -333,6 +377,7 @@ export async function runFullAnalysis(
   perspective: string,
   onProgress?: (phase: AnalysisPhase) => void,
   depth: number = 15,
+  includeGreatMoves: boolean = false,
 ): Promise<GameAnalysisReport> {
   // Step 1 — Reconstruct SAN moves from the FEN history
   const sanMoves: string[] = [];
@@ -356,7 +401,7 @@ export async function runFullAnalysis(
   );
 
   // Step 3 — Threshold filter: find critical moments
-  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations);
+  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations, includeGreatMoves);
 
   // Step 4 — LLM explanation only for the player's critical moments
   const playerMoments = criticalMoments.filter(m => m.side === perspective);
@@ -378,6 +423,7 @@ export async function runFullAnalysis(
   }
 
   // Step 5 — Thematic summary across all moments
+  const gameResult = determineGameResult(gameHistory, perspective);
   onProgress?.({ phase: "summary" });
   let thematicSummary = "";
   if (criticalMoments.length > 0) {
@@ -385,6 +431,8 @@ export async function runFullAnalysis(
       thematicSummary = await invoke<string>("generate_thematic_summary", {
         moments: criticalMoments,
         perspective,
+        includeGreatMoves,
+        gameResult,
       });
     } catch (e) {
       thematicSummary = `Summary unavailable: ${e}`;

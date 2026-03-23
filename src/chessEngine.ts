@@ -13,12 +13,18 @@ export class ChessEngine {
   // Send the board state and tell Stockfish to think
   evaluatePosition(fen: string, depth: number = 18) {
     if (!this.worker) return;
-    this._syncing = true;
-    this._pendingCommands = [
+    const cmds = [
       "setoption name MultiPV value 3",
       `position fen ${fen}`,
       `go depth ${depth}`,
     ];
+    if (this._syncing) {
+      // Already waiting for readyok — just update the queued commands
+      this._pendingCommands = cmds;
+      return;
+    }
+    this._syncing = true;
+    this._pendingCommands = cmds;
     this.worker.postMessage("stop");
     this.worker.postMessage("isready");
   }
@@ -26,12 +32,17 @@ export class ChessEngine {
   // Broaden to more lines once the position is well-understood
   widenSearch(fen: string, depth: number = 18) {
     if (!this.worker) return;
-    this._syncing = true;
-    this._pendingCommands = [
+    const cmds = [
       "setoption name MultiPV value 5",
       `position fen ${fen}`,
       `go depth ${depth}`,
     ];
+    if (this._syncing) {
+      this._pendingCommands = cmds;
+      return;
+    }
+    this._syncing = true;
+    this._pendingCommands = cmds;
     this.worker.postMessage("stop");
     this.worker.postMessage("isready");
   }
@@ -39,6 +50,10 @@ export class ChessEngine {
   // Stop the current search without starting a new one
   stop() {
     if (!this.worker) return;
+    if (this._syncing) {
+      this._pendingCommands = [];
+      return;
+    }
     this._syncing = true;
     this._pendingCommands = [];
     this.worker.postMessage("stop");

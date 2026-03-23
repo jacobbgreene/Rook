@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { ChessEngine } from "./chessEngine";
 import { invoke } from "@tauri-apps/api/core";
-import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash } from "./gameAnalysis";
+import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult } from "./gameAnalysis";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
 
@@ -276,6 +276,8 @@ function App() {
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisPhase | null>(null);
   const [showReportSetup, setShowReportSetup] = useState(false);
   const [reportPerspective, setReportPerspective] = useState<"white" | "black">("white");
+  const [includeGreatMoves, setIncludeGreatMoves] = useState(false);
+  const [analysisDepth, setAnalysisDepth] = useState<number>(12);
   const [mainLineHistory, setMainLineHistory] = useState<string[] | null>(null);
 
   // Save/load report state
@@ -581,6 +583,8 @@ function App() {
         gameHistory,
         reportPerspective,
         (phase) => setAnalysisProgress(phase),
+        analysisDepth,
+        includeGreatMoves,
       );
       setPostGameReport(report);
 
@@ -588,6 +592,7 @@ function App() {
       const gameHash = computeGameHash(gameHistory);
       const sanMoves = reconstructMoves(gameHistory.length - 1);
       const openingMoves = buildPgn(sanMoves.slice(0, Math.min(sanMoves.length, 6)));
+      const result = determineGameResult(gameHistory, reportPerspective);
       const id = `rpt_${Date.now()}`;
       const savedReport: SavedReport = {
         id,
@@ -596,6 +601,7 @@ function App() {
         perspective: reportPerspective,
         moveCount: sanMoves.length,
         openingMoves,
+        result,
         report,
         gameHistory: [...gameHistory],
       };
@@ -609,6 +615,7 @@ function App() {
         moveCount: sanMoves.length,
         openingMoves,
         criticalMomentCount: report.criticalMoments.length,
+        result,
       });
     } catch (error) {
       setPostGameReport({
@@ -718,6 +725,8 @@ function App() {
     setPostGameReport(null);
     setMainLineHistory(null);
     setShowReportSetup(false);
+    setIncludeGreatMoves(false);
+    setAnalysisDepth(12);
     setSavedReportId(null);
     setSavedReportMeta(null);
   };
@@ -1238,6 +1247,11 @@ function App() {
             chipColor = "#6bc5ff";
             chipBorder = "1px solid rgba(80, 180, 255, 0.3)";
             break;
+          case "great_move":
+            chipBg = "rgba(74, 222, 128, 0.15)";
+            chipColor = "#4ade80";
+            chipBorder = "1px solid rgba(74, 222, 128, 0.3)";
+            break;
         }
       }
 
@@ -1282,18 +1296,20 @@ function App() {
           >
             <div className="cm-header">
               <span className={`category-badge badge-${moment.category}`}>
-                {moment.category === "turning_point" ? "Turning Point" : moment.category.charAt(0).toUpperCase() + moment.category.slice(1)}
+                {moment.category === "turning_point" ? "Turning Point" : moment.category === "great_move" ? "Great Move" : moment.category.charAt(0).toUpperCase() + moment.category.slice(1)}
               </span>
               <span className="cm-move-info">
                 Move {moment.moveNumber}: <strong>{moment.moveSan}</strong>
               </span>
-              <span className="cm-eval-drop">
-                {moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
+              <span className="cm-eval-drop" style={moment.category === "great_move" ? { color: "#4ade80" } : undefined}>
+                {moment.category === "great_move" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
               </span>
             </div>
+            {moment.category !== "great_move" && (
             <div className="cm-best-line">
               Best: <strong>{moment.bestMoveSan}</strong>{moment.bestLine.length > 1 && ` → ${moment.bestLine.slice(1).join(" ")}`}
             </div>
+            )}
             <div className="cm-explanation"><ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown></div>
           </div>
         );
@@ -1804,6 +1820,43 @@ function App() {
                 <span style={{ fontSize: "1.2rem" }}>&#9818;</span> Black
               </button>
             </div>
+            <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+              <div className="model-toggle-label">
+                <span className="model-toggle-title">Show what I did well</span>
+                <span className="model-toggle-desc">Highlight great moves that shifted the game in your favor</span>
+              </div>
+              <button
+                className={`toggle-switch ${includeGreatMoves ? "toggle-on" : ""}`}
+                onClick={() => setIncludeGreatMoves(!includeGreatMoves)}
+                role="switch"
+                aria-checked={includeGreatMoves}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </div>
+            <p style={{ margin: "16px 0 8px 0", fontSize: "0.85rem", color: "#aaa" }}>
+              Analysis depth
+            </p>
+            <div className="perspective-selector">
+              <button
+                className={`perspective-option ${analysisDepth === 8 ? "selected" : ""}`}
+                onClick={() => setAnalysisDepth(8)}
+              >
+                Quick
+              </button>
+              <button
+                className={`perspective-option ${analysisDepth === 12 ? "selected" : ""}`}
+                onClick={() => setAnalysisDepth(12)}
+              >
+                Standard
+              </button>
+              <button
+                className={`perspective-option ${analysisDepth === 18 ? "selected" : ""}`}
+                onClick={() => setAnalysisDepth(18)}
+              >
+                Deep
+              </button>
+            </div>
             <button
               className="action-button"
               onClick={() => { setShowReportSetup(false); requestPostGameReport(); }}
@@ -1841,6 +1894,11 @@ function App() {
                         <span className={`perspective-badge perspective-${report.perspective}`}>
                           {report.perspective}
                         </span>
+                        {report.result && report.result !== "unknown" && (
+                          <span className={`result-badge result-${report.result}`}>
+                            {report.result === "win" ? "W" : report.result === "loss" ? "L" : "D"}
+                          </span>
+                        )}
                         <span>{new Date(report.createdAt).toLocaleDateString()}</span>
                         <span>{report.moveCount} moves</span>
                         <span>{report.criticalMomentCount} critical moments</span>

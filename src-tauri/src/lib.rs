@@ -44,13 +44,39 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
         "mistake" => "a significant mistake",
         "inaccuracy" => "an inaccuracy",
         "turning_point" => "a critical turning point",
+        "great_move" => "a great move",
         _ => "a notable moment",
     };
 
     let is_player_move = m.side == perspective;
     let opponent = if perspective == "white" { "black" } else { "white" };
 
-    if is_player_move {
+    let is_great_move = m.category == "great_move";
+
+    if is_player_move && is_great_move {
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num})\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            Evaluation gain: {gain:.1} pawns — classified as {cat}\n\
+            Stockfish's top line: {line}\n\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Why your move {san} was excellent — what tactical or strategic idea it exploited.\n\
+            2. What positional or tactical principle made this the strongest choice.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            gain = -m.eval_drop,
+            cat = category_desc,
+            line = m.best_line.join(" "),
+        )
+    } else if is_player_move {
         format!(
             "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
             Position (FEN): {fen}\n\
@@ -102,13 +128,22 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
     }
 }
 
-fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str) -> String {
+fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str) -> String {
     let opponent = if perspective == "white" { "black" } else { "white" };
+
+    let result_context = match game_result {
+        "win" => format!("The {} player won this game.", perspective),
+        "loss" => format!("The {} player lost this game.", perspective),
+        "draw" => "The game ended in a draw.".to_string(),
+        _ => "The game outcome is not determined (may have been resigned or abandoned).".to_string(),
+    };
 
     let mut prompt = format!(
         "You are a chess coach providing a targeted post-game summary for the {perspective} player.\n\n\
+        Game result: {result}\n\n\
         The following critical moments were identified:\n\n",
-        perspective = perspective
+        perspective = perspective,
+        result = result_context,
     );
 
     for m in moments {
@@ -117,20 +152,41 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
         } else {
             format!("Opponent's ({}) move", opponent)
         };
-        prompt += &format!(
-            "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.\n",
-            m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop,
-        );
+        if m.category == "great_move" {
+            prompt += &format!(
+                "- Move {} ({}): Played {}. Category: great_move, eval gain: {:.1} pawns.\n",
+                m.move_number, whose, m.move_san, -m.eval_drop,
+            );
+        } else {
+            prompt += &format!(
+                "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.\n",
+                m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop,
+            );
+        }
     }
 
-    prompt += &format!(
-        "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
-        - Identify your most common types of errors and recurring patterns\n\
-        - Note if you missed opportunities to capitalize on your opponent's mistakes\n\
-        - Suggest one specific, actionable area to focus on for improvement\n\
-        Address the player directly as \"you\".",
-        perspective
-    );
+    if include_great_moves {
+        prompt += &format!(
+            "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
+            - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
+            - Note any strong moves or sound tactical/positional decisions the player made\n\
+            - If there were mistakes, identify the key patterns to work on\n\
+            - Suggest one concrete area for improvement\n\
+            Keep the tone direct and factual — recognize good play without excessive praise.\n\
+            Address the player directly as \"you\".",
+            perspective
+        );
+    } else {
+        prompt += &format!(
+            "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
+            - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
+            - Identify your most common types of errors and recurring patterns\n\
+            - Note if you missed opportunities to capitalize on your opponent's mistakes\n\
+            - Suggest one specific, actionable area to focus on for improvement\n\
+            Address the player directly as \"you\".",
+            perspective
+        );
+    }
 
     prompt
 }
@@ -171,8 +227,14 @@ struct SavedReport {
     perspective: String,
     move_count: u32,
     opening_moves: String,
+    #[serde(default = "default_result")]
+    result: String,
     report: GameAnalysisReportData,
     game_history: Vec<String>,
+}
+
+fn default_result() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +270,8 @@ struct SavedReportMeta {
     move_count: u32,
     opening_moves: String,
     critical_moment_count: u32,
+    #[serde(default = "default_result")]
+    result: String,
 }
 
 fn get_reports_dir(app: &tauri::AppHandle) -> PathBuf {
@@ -487,6 +551,8 @@ async fn explain_critical_moment(
 async fn generate_thematic_summary(
     moments: Vec<CriticalMomentData>,
     perspective: String,
+    include_great_moves: Option<bool>,
+    game_result: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let (gemini_key, openai_key) = resolve_api_keys(&state.api_keys)?;
@@ -495,7 +561,8 @@ async fn generate_thematic_summary(
         return Err("No API key configured.".to_string());
     }
 
-    let prompt = build_thematic_summary_prompt(&moments, &perspective);
+    let result_str = game_result.as_deref().unwrap_or("unknown");
+    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str);
     let preamble = "You are a chess coach writing a concise post-game summary. Focus on actionable patterns the player can improve.";
 
     if !gemini_key.is_empty() {
@@ -555,6 +622,7 @@ fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
             move_count: report.move_count,
             opening_moves: report.opening_moves,
             critical_moment_count: report.report.critical_moments.len() as u32,
+            result: report.result.clone(),
         });
     }
 
@@ -607,6 +675,7 @@ fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Optio
                 move_count: report.move_count,
                 opening_moves: report.opening_moves,
                 critical_moment_count: report.report.critical_moments.len() as u32,
+                result: report.result.clone(),
             }));
         }
     }
