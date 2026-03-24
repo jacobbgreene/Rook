@@ -1305,6 +1305,11 @@ function App() {
             chipColor = "#4ade80";
             chipBorder = "1px solid rgba(74, 222, 128, 0.3)";
             break;
+          case "brilliant":
+            chipBg = "rgba(34, 211, 238, 0.15)";
+            chipColor = "#22d3ee";
+            chipBorder = "1px solid rgba(34, 211, 238, 0.3)";
+            break;
         }
       }
 
@@ -1349,16 +1354,16 @@ function App() {
           >
             <div className="cm-header">
               <span className={`category-badge badge-${moment.category}`}>
-                {moment.category === "turning_point" ? "Turning Point" : moment.category === "great_move" ? "Great Move" : moment.category.charAt(0).toUpperCase() + moment.category.slice(1)}
+                {moment.category === "turning_point" ? "Turning Point" : moment.category === "great_move" ? "Great Move" : moment.category === "brilliant" ? "Brilliant" : moment.category.charAt(0).toUpperCase() + moment.category.slice(1)}
               </span>
               <span className="cm-move-info">
                 Move {moment.moveNumber}: <strong>{moment.moveSan}</strong>
               </span>
-              <span className="cm-eval-drop" style={moment.category === "great_move" ? { color: "#4ade80" } : undefined}>
-                {moment.category === "great_move" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
+              <span className="cm-eval-drop" style={moment.category === "great_move" ? { color: "#4ade80" } : moment.category === "brilliant" ? { color: "#22d3ee" } : undefined}>
+                {moment.category === "great_move" || moment.category === "brilliant" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
               </span>
             </div>
-            {moment.category !== "great_move" && moment.bestLine.length > 0 && (() => {
+            {moment.category !== "great_move" && moment.category !== "brilliant" && moment.bestLine.length > 0 && (() => {
               const fenIdx = gameHistory.indexOf(moment.fen);
               const activeBestLineIdx = fenIdx >= 0 && isExploringVariation
                 ? currentMoveIndex - fenIdx - 1

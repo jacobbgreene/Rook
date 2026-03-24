@@ -45,6 +45,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
         "inaccuracy" => "an inaccuracy",
         "turning_point" => "a critical turning point",
         "great_move" => "a great move",
+        "brilliant" => "a brilliant move",
         _ => "a notable moment",
     };
 
@@ -52,8 +53,32 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
     let opponent = if perspective == "white" { "black" } else { "white" };
 
     let is_great_move = m.category == "great_move";
+    let is_brilliant = m.category == "brilliant";
 
-    if is_player_move && is_great_move {
+    if is_player_move && is_brilliant {
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num})\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            Evaluation gain: {gain:.1} pawns — classified as {cat}\n\
+            Stockfish's top line: {line}\n\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Why your move {san} was brilliant — this was the only strong continuation in a complex position, and you found it.\n\
+            2. What made the alternatives so much worse and why this position demanded precise play.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            gain = -m.eval_drop,
+            cat = category_desc,
+            line = m.best_line.join(" "),
+        )
+    } else if is_player_move && is_great_move {
         format!(
             "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
             Position (FEN): {fen}\n\
@@ -152,7 +177,12 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
         } else {
             format!("Opponent's ({}) move", opponent)
         };
-        if m.category == "great_move" {
+        if m.category == "brilliant" {
+            prompt += &format!(
+                "- Move {} ({}): Played {}. Category: brilliant, eval gain: {:.1} pawns. Found the only strong move in a complex position.\n",
+                m.move_number, whose, m.move_san, -m.eval_drop,
+            );
+        } else if m.category == "great_move" {
             prompt += &format!(
                 "- Move {} ({}): Played {}. Category: great_move, eval gain: {:.1} pawns.\n",
                 m.move_number, whose, m.move_san, -m.eval_drop,

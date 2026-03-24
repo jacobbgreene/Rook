@@ -25,7 +25,7 @@ export interface CriticalMoment {
   evalBefore: number; // pawns, from white's perspective
   evalAfter: number;
   evalDrop: number; // positive = player worsened their position
-  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move";
+  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "brilliant";
   bestMoveSan: string;
   bestLine: string[];
 }
@@ -320,6 +320,26 @@ export function filterCriticalMoments(
     else if (evalDrop > 3.0) category = "blunder";
     else if (evalDrop > 1.5) category = "mistake";
     else if (evalDrop > 0.75) category = "inaccuracy";
+
+    // Brilliant move: player found the *only* strong move in a complex position.
+    // The gap between the engine's top two lines is huge, meaning there was one
+    // narrow path and the player found it.
+    if (!category && includeGreatMoves && evalDrop <= 0.15) {
+      const topLines = evalBefore.topLines;
+      if (topLines.length >= 2) {
+        const rawScoreLine = (line: EngineLine): number => {
+          if (line.scoreMate !== null) return line.scoreMate > 0 ? MATE_CP : -MATE_CP;
+          return line.scoreCp ?? 0;
+        };
+        const score1 = rawScoreLine(topLines[0]);
+        const score2 = rawScoreLine(topLines[1]);
+        const gap = score1 - score2; // both from side-to-move perspective
+        const moverEval = isWhiteTurn ? normBefore : -normBefore;
+        if (gap >= 150 && moverEval < 500) {
+          category = "brilliant";
+        }
+      }
+    }
 
     // Great move: the player's position improved significantly over the last
     // two half-moves (opponent's move + player's response) and the player

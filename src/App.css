@@ -592,6 +592,12 @@ button {
   border: 1px solid rgba(74, 222, 128, 0.3);
 }
 
+.badge-brilliant {
+  background: rgba(34, 211, 238, 0.15);
+  color: #22d3ee;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+}
+
 .cm-move-info {
   font-size: 0.82rem;
   color: #ccc;
