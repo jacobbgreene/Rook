@@ -1,3 +1,5 @@
+mod engine;
+
 use rig::providers::{openai, gemini};
 use rig::providers::gemini::completion::gemini_api_types::{
     AdditionalParameters, GenerationConfig, ThinkingConfig, ThinkingLevel,
@@ -8,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
 
 const CHESS_COACH_PROMPT: &str = include_str!("prompts/chess-coach.md");
 
@@ -45,7 +48,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
         "inaccuracy" => "an inaccuracy",
         "turning_point" => "a critical turning point",
         "great_move" => "a great move",
-        "brilliant" => "a brilliant move",
+        "critical" => "a critical move",
         _ => "a notable moment",
     };
 
@@ -53,9 +56,9 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
     let opponent = if perspective == "white" { "black" } else { "white" };
 
     let is_great_move = m.category == "great_move";
-    let is_brilliant = m.category == "brilliant";
+    let is_critical = m.category == "critical";
 
-    if is_player_move && is_brilliant {
+    if is_player_move && is_critical {
         format!(
             "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
             Position (FEN): {fen}\n\
@@ -65,7 +68,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             Evaluation gain: {gain:.1} pawns — classified as {cat}\n\
             Stockfish's top line: {line}\n\n\
             In 2-3 concise sentences, explain to the player:\n\
-            1. Why your move {san} was brilliant — this was the only strong continuation in a complex position, and you found it.\n\
+            1. Why your move {san} was critical — this was the only strong continuation in a complex position, and you found it.\n\
             2. What made the alternatives so much worse and why this position demanded precise play.\n\
             Address the player directly as \"you\".",
             perspective = perspective,
@@ -177,9 +180,9 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
         } else {
             format!("Opponent's ({}) move", opponent)
         };
-        if m.category == "brilliant" {
+        if m.category == "critical" {
             prompt += &format!(
-                "- Move {} ({}): Played {}. Category: brilliant, eval gain: {:.1} pawns. Found the only strong move in a complex position.\n",
+                "- Move {} ({}): Played {}. Category: critical, eval gain: {:.1} pawns. Found the only strong move in a complex position.\n",
                 m.move_number, whose, m.move_san, -m.eval_drop,
             );
         } else if m.category == "great_move" {
@@ -481,7 +484,7 @@ async fn deep_analysis(
         "{}\n\nYou are providing a deep game analysis. The user is playing as {}. \
         Return ONLY a JSON array of annotation objects, with no other text. \
         Each object has: {{\"moveNumber\": <number>, \"side\": \"white\" or \"black\", \"comment\": \"<your insight>\"}}. \
-        Annotate 4-8 strategically significant moves. Focus on turning points, mistakes, brilliant moves, \
+        Annotate 4-8 strategically significant moves. Focus on turning points, mistakes, critical moves, \
         and key strategic decisions. Use standard algebraic notation when referencing moves.",
         CHESS_COACH_PROMPT, perspective
     );
@@ -713,6 +716,65 @@ fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Optio
     Ok(None)
 }
 
+// ── Stockfish Worker Pool Command ─────────────────────────────
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineProgress {
+    current: usize,
+    total: usize,
+}
+
+#[tauri::command]
+async fn run_engine_pass(
+    positions: Vec<String>,
+    depth: u32,
+    multipv: u32,
+    app: tauri::AppHandle,
+) -> Result<Vec<engine::PositionEval>, String> {
+    let stockfish_path = engine::find_stockfish_path()?;
+    let total = positions.len();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Background task: poll the shared counter and emit progress events.
+    // Stops when `done` is set (on success *or* failure).
+    let completed_for_progress = completed.clone();
+    let done_for_progress = done.clone();
+    let app_for_progress = app.clone();
+    let progress_task = tokio::spawn(async move {
+        let mut last_reported = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if done_for_progress.load(Ordering::Relaxed) {
+                break;
+            }
+            let current = completed_for_progress.load(Ordering::Relaxed);
+            if current != last_reported {
+                last_reported = current;
+                let _ = app_for_progress.emit(
+                    "engine-progress",
+                    EngineProgress { current, total },
+                );
+            }
+        }
+    });
+
+    let result = engine::run_engine_pass(
+        positions,
+        depth,
+        multipv,
+        &stockfish_path,
+        completed,
+    )
+    .await;
+
+    // Signal the progress poller to stop, then wait for it
+    done.store(true, Ordering::Relaxed);
+    let _ = progress_task.await;
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -739,6 +801,7 @@ pub fn run() {
             load_report,
             delete_report,
             check_report_exists,
+            run_engine_pass,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

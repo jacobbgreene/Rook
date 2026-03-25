@@ -1,5 +1,6 @@
 import { Chess } from "chess.js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ═══════════════════════════════════════════════════════════════
 // Shared Data Models
@@ -25,7 +26,7 @@ export interface CriticalMoment {
   evalBefore: number; // pawns, from white's perspective
   evalAfter: number;
   evalDrop: number; // positive = player worsened their position
-  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "brilliant";
+  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical";
   bestMoveSan: string;
   bestLine: string[];
 }
@@ -132,97 +133,7 @@ function toWhitePerspective(cpFromSideToMove: number, isWhiteTurn: boolean): num
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Promise-based Stockfish Evaluation (dedicated worker)
-// ═══════════════════════════════════════════════════════════════
-
-/** Wait for a specific message from the worker. */
-function waitForMessage(worker: Worker, predicate: (msg: string) => boolean): Promise<void> {
-  return new Promise((resolve) => {
-    const handler = (event: MessageEvent) => {
-      if (predicate(event.data as string)) {
-        worker.removeEventListener("message", handler);
-        resolve();
-      }
-    };
-    worker.addEventListener("message", handler);
-  });
-}
-
-/** Evaluate a single position to a fixed depth. Returns when 'bestmove' arrives. */
-async function evaluatePosition(
-  worker: Worker,
-  fen: string,
-  depth: number,
-  multipv: number = 3,
-): Promise<PositionEval> {
-  // Flush any stale output
-  worker.postMessage("stop");
-  const readyPromise = waitForMessage(worker, (m) => m === "readyok");
-  worker.postMessage("isready");
-  await readyPromise;
-
-  // Collect lines as the search runs, resolve on bestmove
-  return new Promise((resolve) => {
-    const lines = new Map<
-      number,
-      { depth: number; scoreCp: number | null; scoreMate: number | null; pv: string[] }
-    >();
-
-    const handler = (event: MessageEvent) => {
-      const msg = event.data as string;
-
-      if (msg.startsWith("info depth") && !msg.includes("currmovenumber")) {
-        const depthMatch = msg.match(/depth (\d+)/);
-        const mpvMatch = msg.match(/multipv (\d+)/);
-        const pvMatch = msg.match(/ pv (.+)/);
-
-        if (depthMatch && pvMatch) {
-          const d = parseInt(depthMatch[1]);
-          const mpv = mpvMatch ? parseInt(mpvMatch[1]) : 1;
-          let scoreCp: number | null = null;
-          let scoreMate: number | null = null;
-
-          const cpMatch = msg.match(/score cp (-?\d+)/);
-          const mateMatch = msg.match(/score mate (-?\d+)/);
-          if (cpMatch) scoreCp = parseInt(cpMatch[1]);
-          else if (mateMatch) scoreMate = parseInt(mateMatch[1]);
-
-          const existing = lines.get(mpv);
-          if (!existing || d > existing.depth) {
-            lines.set(mpv, { depth: d, scoreCp, scoreMate, pv: pvMatch[1].split(" ") });
-          }
-        }
-      }
-
-      if (msg.startsWith("bestmove")) {
-        worker.removeEventListener("message", handler);
-
-        const topLines: EngineLine[] = Array.from(lines.entries())
-          .sort(([a], [b]) => a - b)
-          .map(([, line]) => ({
-            scoreCp: line.scoreCp,
-            scoreMate: line.scoreMate,
-            pv: line.pv,
-          }));
-
-        const best = topLines[0];
-        resolve({
-          scoreCp: best?.scoreCp ?? 0,
-          scoreMate: best?.scoreMate ?? null,
-          topLines,
-        });
-      }
-    };
-
-    worker.addEventListener("message", handler);
-    worker.postMessage(`setoption name MultiPV value ${multipv}`);
-    worker.postMessage(`position fen ${fen}`);
-    worker.postMessage(`go depth ${depth}`);
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Engine Pass — evaluate every position in the game
+// Engine Pass — evaluate every position via native Stockfish pool
 // ═══════════════════════════════════════════════════════════════
 
 export async function runEnginePass(
@@ -230,28 +141,26 @@ export async function runEnginePass(
   depth: number = 15,
   onProgress?: (current: number, total: number) => void,
 ): Promise<PositionEval[]> {
-  const worker = new Worker("/stockfish.js");
-  worker.postMessage("uci");
-  await waitForMessage(worker, (m) => m.includes("uciok"));
-
-  const evaluations: PositionEval[] = [];
-
-  for (let i = 0; i < positions.length; i++) {
-    onProgress?.(i + 1, positions.length);
-
-    const game = new Chess(positions[i]);
-    if (game.isCheckmate()) {
-      // Side to move is mated
-      evaluations.push({ scoreCp: -MATE_CP, scoreMate: null, topLines: [] });
-    } else if (game.isDraw() || game.isStalemate()) {
-      evaluations.push({ scoreCp: 0, scoreMate: null, topLines: [] });
-    } else {
-      evaluations.push(await evaluatePosition(worker, positions[i], depth));
-    }
+  // Subscribe to progress events from the Rust worker pool
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<{ current: number; total: number }>(
+      "engine-progress",
+      (event) => {
+        onProgress(event.payload.current, event.payload.total);
+      },
+    );
   }
 
-  worker.terminate();
-  return evaluations;
+  try {
+    return await invoke<PositionEval[]>("run_engine_pass", {
+      positions,
+      depth,
+      multipv: 3,
+    });
+  } finally {
+    unlisten?.();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -321,7 +230,7 @@ export function filterCriticalMoments(
     else if (evalDrop > 1.5) category = "mistake";
     else if (evalDrop > 0.75) category = "inaccuracy";
 
-    // Brilliant move: player found the *only* strong move in a complex position.
+    // Critical move: player found the *only* strong move in a complex position.
     // The gap between the engine's top two lines is huge, meaning there was one
     // narrow path and the player found it.
     if (!category && includeGreatMoves && evalDrop <= 0.15) {
@@ -336,7 +245,7 @@ export function filterCriticalMoments(
         const gap = score1 - score2; // both from side-to-move perspective
         const moverEval = isWhiteTurn ? normBefore : -normBefore;
         if (gap >= 150 && moverEval < 500) {
-          category = "brilliant";
+          category = "critical";
         }
       }
     }

@@ -592,6 +592,7 @@ button {
   border: 1px solid rgba(74, 222, 128, 0.3);
 }
 
+.badge-critical,
 .badge-brilliant {
   background: rgba(34, 211, 238, 0.15);
   color: #22d3ee;
