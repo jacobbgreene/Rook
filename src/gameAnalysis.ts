@@ -26,7 +26,7 @@ export interface CriticalMoment {
   evalBefore: number; // pawns, from white's perspective
   evalAfter: number;
   evalDrop: number; // positive = player worsened their position
-  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical";
+  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical" | "brilliant";
   bestMoveSan: string;
   bestLine: string[];
 }

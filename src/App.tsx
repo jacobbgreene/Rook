@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
-import { ChessEngine } from "./chessEngine";
 import { invoke } from "@tauri-apps/api/core";
 import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult } from "./gameAnalysis";
+import { useLiveEngine } from "./useLiveEngine";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
 
@@ -14,14 +14,6 @@ interface Arrow {
   startSquare: string;
   endSquare: string;
   color: string;
-}
-
-interface EngineThought {
-  multipv: number;
-  depth: string;
-  score: string;
-  moves: any[];
-  rawFirstMove: string;
 }
 
 interface MoveAnnotation {
@@ -242,25 +234,24 @@ const StarIcon = () => (
 function App() {
   const [game, setGame] = useState(new Chess());
   const [gameHistory, setGameHistory] = useState<string[]>([new Chess().fen()]);
+  const [gameSanList, setGameSanList] = useState<string[]>([]);
   const [currentMoveIndex, setCurrentMoveIndex] = useState(0);
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">(
     "white",
   );
 
-  const [evaluation, setEvaluation] = useState("");
-  const [engineThoughts, setEngineThoughts] = useState<
-    Record<number, EngineThought>
-  >({});
+  const {
+    engineThoughts,
+    evaluation,
+    startAnalysis,
+    stopAnalysis,
+    newGame: resetEngine,
+  } = useLiveEngine();
   const [coachMessage, setCoachMessage] = useState("");
   const [isCoachLoading, setIsCoachLoading] = useState(false);
   const [deepAnalysisAnnotations, setDeepAnalysisAnnotations] = useState<MoveAnnotation[] | null>(null);
   const [isDeepAnalysisLoading, setIsDeepAnalysisLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"strategize" | "analysis" | "report">("strategize");
-  const engineRef = useRef<ChessEngine | null>(null);
-  const currentFenRef = useRef(new Chess().fen());
-  const analysisGenRef = useRef(0);
-  const widenedRef = useRef(false);
-  const evalDepthRef = useRef(0);
 
   // API Key management state
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
@@ -352,126 +343,23 @@ function App() {
       .catch(() => setSavedReportMeta(null));
   }, [gameHistory]);
 
-  useEffect(() => {
-    engineRef.current = new ChessEngine();
-    engineRef.current.onMessage((msg) => {
-      if (msg.startsWith("info depth") && !msg.includes("currmovenumber")) {
-        const depthMatch = msg.match(/depth (\d+)/);
-        const multipvMatch = msg.match(/multipv (\d+)/);
-        const pvMatch = msg.match(/ pv (.+)/);
-
-        let score = "";
-        if (msg.includes("score cp")) {
-          const match = msg.match(/score cp (-?\d+)/);
-          if (match) {
-            score = (parseInt(match[1]) / 100).toFixed(2);
-          }
-        } else if (msg.includes("score mate")) {
-          const match = msg.match(/score mate (-?\d+)/);
-          if (match) {
-            score = `M${match[1]}`;
-          }
-        }
-
-        if (depthMatch && pvMatch) {
-          const depth = depthMatch[1];
-          const multipv = multipvMatch ? parseInt(multipvMatch[1], 10) : 1;
-          const rawMoves = pvMatch[1].split(" ").slice(0, 5);
-
-          // Capture current analysis generation for stale detection
-          const msgGen = analysisGenRef.current;
-
-          // Discard stale results from a previous position
-          const firstMove = rawMoves[0];
-          if (firstMove && firstMove.length >= 4) {
-            try {
-              const testGame = new Chess(currentFenRef.current);
-              testGame.move({
-                from: firstMove.slice(0, 2),
-                to: firstMove.slice(2, 4),
-                promotion: firstMove.length >= 5 ? firstMove[4] : undefined,
-              });
-            } catch {
-              return; // move is illegal in current position — stale result
-            }
-          }
-
-          setEngineThoughts((prev) => {
-            // Discard if a new analysis started since this message arrived
-            if (msgGen !== analysisGenRef.current) return prev;
-
-            const currentLine = prev[multipv];
-            if (
-              !currentLine ||
-              parseInt(depth) >= parseInt(currentLine.depth)
-            ) {
-              return {
-                ...prev,
-                [multipv]: {
-                  multipv,
-                  depth,
-                  score,
-                  moves: rawMoves,
-                  rawFirstMove: rawMoves[0],
-                },
-              };
-            }
-            return prev;
-          });
-
-          const depthNum = parseInt(depth);
-
-          if (
-            multipv === 1 &&
-            score &&
-            msgGen === analysisGenRef.current &&
-            depthNum >= 5 &&
-            depthNum >= evalDepthRef.current
-          ) {
-            evalDepthRef.current = depthNum;
-            setEvaluation(score);
-          }
-
-          // Phase 2: once depth 8 is reached, widen to 5 lines
-          if (
-            multipv === 1 &&
-            depthNum >= 8 &&
-            !widenedRef.current &&
-            msgGen === analysisGenRef.current
-          ) {
-            widenedRef.current = true;
-            setEngineThoughts({});
-            engineRef.current?.widenSearch(currentFenRef.current);
-          }
-        }
-      }
-    });
-
-    // Start analyzing the initial position
-    engineRef.current.evaluatePosition(currentFenRef.current);
-
-    return () => {
-      engineRef.current?.terminate();
-    };
-  }, []);
-
-  const startAnalysis = (fen: string) => {
-    analysisGenRef.current += 1;
-    widenedRef.current = false;
-    evalDepthRef.current = 0;
-    currentFenRef.current = fen;
-    setEngineThoughts({});
-    setEvaluation("");
+  // Wrap startAnalysis to also clear coach message and handle game-over.
+  // Callers that already have a Chess instance should pass gameOver directly
+  // to avoid constructing a throwaway Chess object in the hot path.
+  const handlePositionChange = (fen: string, gameOver?: boolean) => {
     setCoachMessage("");
-    if (engineRef.current) {
-      const check = new Chess(fen);
-      if (!check.isGameOver()) {
-        engineRef.current.evaluatePosition(fen);
-      } else {
-        engineRef.current.stop();
-      }
+    const isOver = gameOver ?? new Chess(fen).isGameOver();
+    if (!isOver) {
+      startAnalysis(fen);
+    } else {
+      stopAnalysis();
     }
   };
+
+  // Start analyzing the initial position on mount
+  useEffect(() => {
+    startAnalysis(new Chess().fen());
+  }, []);
 
   const askCoach = async () => {
     if (isCoachLoading) return;
@@ -501,21 +389,21 @@ function App() {
     }
   };
 
-  const reconstructMoves = (endIndex?: number): string[] => {
-    const limit = endIndex ?? currentMoveIndex;
+  // Reconstruct SAN moves from a FEN history. Only used for on-demand
+  // operations (deep analysis, report save) — NOT on every move.
+  const reconstructSansFromHistory = (fens: string[], endIndex?: number): string[] => {
+    const limit = endIndex ?? (fens.length - 1);
     const sanMoves: string[] = [];
     for (let i = 0; i < limit; i++) {
-      const fromFen = gameHistory[i];
-      const toFen = gameHistory[i + 1];
-      const tempGame = new Chess(fromFen);
-      const legalMoves = tempGame.moves();
-      for (const san of legalMoves) {
-        const testGame = new Chess(fromFen);
-        testGame.move(san);
-        if (testGame.fen() === toFen) {
+      const tempGame = new Chess(fens[i]);
+      const toFen = fens[i + 1];
+      for (const san of tempGame.moves()) {
+        tempGame.move(san);
+        if (tempGame.fen() === toFen) {
           sanMoves.push(san);
           break;
         }
+        tempGame.undo();
       }
     }
     return sanMoves;
@@ -539,7 +427,7 @@ function App() {
     setDeepAnalysisAnnotations(null);
 
     try {
-      const sanMoves = reconstructMoves();
+      const sanMoves = gameSanList.slice(0, currentMoveIndex);
       const pgn = buildPgn(sanMoves);
 
       const top3Lines = Object.values(engineThoughts)
@@ -589,11 +477,11 @@ function App() {
       setPostGameReport(report);
       setCurrentMoveIndex(1);
       setGame(new Chess(gameHistory[1]));
-      startAnalysis(gameHistory[1]);
+      handlePositionChange(gameHistory[1]);
 
       // Auto-save the report
       const gameHash = computeGameHash(gameHistory);
-      const sanMoves = reconstructMoves(gameHistory.length - 1);
+      const sanMoves = gameSanList;
       const openingMoves = buildPgn(sanMoves.slice(0, Math.min(sanMoves.length, 6)));
       const result = determineGameResult(gameHistory, reportPerspective);
       const id = `rpt_${Date.now()}`;
@@ -633,7 +521,7 @@ function App() {
 
   const navigateToMove = (historyIndex: number) => {
     if (historyIndex >= 0 && historyIndex < gameHistory.length) {
-      startAnalysis(gameHistory[historyIndex]);
+      handlePositionChange(gameHistory[historyIndex]);
       setCurrentMoveIndex(historyIndex);
       setGame(new Chess(gameHistory[historyIndex]));
     }
@@ -657,14 +545,17 @@ function App() {
         }
 
         const newFen = gameCopy.fen();
-        startAnalysis(newFen);
+        const isOver = gameCopy.isGameOver();
         setGame(gameCopy);
         const newHistory = [
           ...gameHistory.slice(0, currentMoveIndex + 1),
           newFen,
         ];
         setGameHistory(newHistory);
+        setGameSanList([...gameSanList.slice(0, currentMoveIndex), result.san]);
         setCurrentMoveIndex(newHistory.length - 1);
+        // Defer engine IPC so the board renders the drop immediately
+        setTimeout(() => handlePositionChange(newFen, isOver), 0);
         return true;
       }
     } catch (e) {
@@ -692,7 +583,7 @@ function App() {
   const moveBack = () => {
     if (currentMoveIndex > 0) {
       const newIndex = currentMoveIndex - 1;
-      startAnalysis(gameHistory[newIndex]);
+      handlePositionChange(gameHistory[newIndex]);
       setCurrentMoveIndex(newIndex);
       setGame(new Chess(gameHistory[newIndex]));
     }
@@ -701,7 +592,7 @@ function App() {
   const moveForward = () => {
     if (currentMoveIndex < gameHistory.length - 1) {
       const newIndex = currentMoveIndex + 1;
-      startAnalysis(gameHistory[newIndex]);
+      handlePositionChange(gameHistory[newIndex]);
       setCurrentMoveIndex(newIndex);
       setGame(new Chess(gameHistory[newIndex]));
     }
@@ -709,7 +600,7 @@ function App() {
 
   const moveToStart = () => {
     if (currentMoveIndex > 0) {
-      startAnalysis(gameHistory[0]);
+      handlePositionChange(gameHistory[0]);
       setCurrentMoveIndex(0);
       setGame(new Chess(gameHistory[0]));
     }
@@ -718,7 +609,7 @@ function App() {
   const moveToEnd = () => {
     const lastIndex = gameHistory.length - 1;
     if (currentMoveIndex < lastIndex) {
-      startAnalysis(gameHistory[lastIndex]);
+      handlePositionChange(gameHistory[lastIndex]);
       setCurrentMoveIndex(lastIndex);
       setGame(new Chess(gameHistory[lastIndex]));
     }
@@ -730,9 +621,11 @@ function App() {
 
   const resetBoard = () => {
     const newGame = new Chess();
-    startAnalysis(newGame.fen());
+    resetEngine();
+    handlePositionChange(newGame.fen());
     setGame(newGame);
     setGameHistory([newGame.fen()]);
+    setGameSanList([]);
     setCurrentMoveIndex(0);
     setBoardOrientation("white");
     setActiveTab("strategize");
@@ -793,14 +686,17 @@ function App() {
       }
 
       setGameHistory(fens);
+      setGameSanList(moves);
       setCurrentMoveIndex(fens.length - 1);
     } else {
       // It was a single FEN position
       setGameHistory([newGame.fen()]);
+      setGameSanList([]);
       setCurrentMoveIndex(0);
     }
 
-    startAnalysis(newGame.fen());
+    resetEngine();
+    handlePositionChange(newGame.fen());
     setGame(newGame);
     setImportInput("");
     setActiveTab("strategize");
@@ -814,10 +710,11 @@ function App() {
     setSavedReportMeta(null);
   };
 
-  const playLineToMove = (moves: any[], targetIndex: number) => {
+  const playLineToMove = (uciMoves: string[], targetIndex: number) => {
     const gameCopy = new Chess();
     const currentFen = gameHistory[currentMoveIndex];
     const baseHistory = gameHistory.slice(0, currentMoveIndex + 1);
+    const baseSans = gameSanList.slice(0, currentMoveIndex);
     try {
       gameCopy.load(currentFen);
     } catch (e) {
@@ -825,11 +722,11 @@ function App() {
     }
 
     const newHistory = [...baseHistory];
+    const newSans = [...baseSans];
 
     for (let i = 0; i <= targetIndex; i++) {
-      const moveVal = moves[i];
-      const rawMove = typeof moveVal === "string" ? moveVal : moveVal?.raw;
-      if (!rawMove) break;
+      const rawMove = uciMoves[i];
+      if (!rawMove || rawMove.length < 4) break;
       const from = rawMove.slice(0, 2);
       const to = rawMove.slice(2, 4);
       const promotion = rawMove.length >= 5 ? rawMove[4] : undefined;
@@ -837,6 +734,7 @@ function App() {
         const result = gameCopy.move({ from, to, promotion });
         if (result) {
           newHistory.push(gameCopy.fen());
+          newSans.push(result.san);
         } else {
           break;
         }
@@ -846,9 +744,10 @@ function App() {
     }
 
     if (newHistory.length > baseHistory.length) {
-      startAnalysis(gameCopy.fen());
+      handlePositionChange(gameCopy.fen(), gameCopy.isGameOver());
       setGame(gameCopy);
       setGameHistory(newHistory);
+      setGameSanList(newSans);
       setCurrentMoveIndex(newHistory.length - 1);
     }
   };
@@ -858,15 +757,18 @@ function App() {
     const baseHistory = historyIndex >= 0
       ? gameHistory.slice(0, historyIndex + 1)
       : [...gameHistory, fen];
+    const baseSans = gameSanList.slice(0, historyIndex >= 0 ? historyIndex : gameSanList.length);
 
     // Play ALL moves in the best line so Forward/Back can step through them
     const fullGame = new Chess(fen);
     const newHistory = [...baseHistory];
+    const newSans = [...baseSans];
     for (let i = 0; i < sanMoves.length; i++) {
       try {
         const result = fullGame.move(sanMoves[i]);
         if (result) {
           newHistory.push(fullGame.fen());
+          newSans.push(result.san);
         } else {
           break;
         }
@@ -880,9 +782,10 @@ function App() {
       const navIndex = baseHistory.length + targetIndex;
       const clampedIndex = Math.min(navIndex, newHistory.length - 1);
       const navGame = new Chess(newHistory[clampedIndex]);
-      startAnalysis(newHistory[clampedIndex]);
+      handlePositionChange(newHistory[clampedIndex], navGame.isGameOver());
       setGame(navGame);
       setGameHistory(newHistory);
+      setGameSanList(newSans);
       setCurrentMoveIndex(clampedIndex);
     }
   };
@@ -922,30 +825,6 @@ function App() {
   const displayThoughts = Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
     .slice(0, 3);
-
-  const uciMovesToSan = (uciMoves: any[]): string[] => {
-    const tempGame = new Chess(game.fen());
-    const sanMoves: string[] = [];
-    for (const moveVal of uciMoves) {
-      const rawMove = typeof moveVal === "string" ? moveVal : moveVal?.raw;
-      if (!rawMove || rawMove.length < 4) break;
-      try {
-        const result = tempGame.move({
-          from: rawMove.slice(0, 2),
-          to: rawMove.slice(2, 4),
-          promotion: rawMove.length >= 5 ? rawMove[4] : undefined,
-        });
-        if (result) {
-          sanMoves.push(result.san);
-        } else {
-          break;
-        }
-      } catch {
-        break;
-      }
-    }
-    return sanMoves;
-  };
 
   const getEvalInfo = () => {
     if (!evaluation || currentMoveIndex === 0)
@@ -1111,42 +990,11 @@ function App() {
 
   const hasPremiumKey = apiKeyStatus?.gemini_set || apiKeyStatus?.openai_set;
 
-  // Memoize SAN reconstruction — this is expensive (creates Chess instances for every position)
-  const gameSanMoves = useMemo(() => {
-    const sans: string[] = [];
-    for (let i = 0; i < gameHistory.length - 1; i++) {
-      const fromFen = gameHistory[i];
-      const toFen = gameHistory[i + 1];
-      const tempGame = new Chess(fromFen);
-      for (const san of tempGame.moves()) {
-        const testGame = new Chess(fromFen);
-        testGame.move(san);
-        if (testGame.fen() === toFen) {
-          sans.push(san);
-          break;
-        }
-      }
-    }
-    return sans;
-  }, [gameHistory]);
+  const gameSanMoves = gameSanList;
 
   const mainLineSanMoves = useMemo(() => {
     if (!mainLineHistory) return null;
-    const sans: string[] = [];
-    for (let i = 0; i < mainLineHistory.length - 1; i++) {
-      const fromFen = mainLineHistory[i];
-      const toFen = mainLineHistory[i + 1];
-      const tempGame = new Chess(fromFen);
-      for (const san of tempGame.moves()) {
-        const testGame = new Chess(fromFen);
-        testGame.move(san);
-        if (testGame.fen() === toFen) {
-          sans.push(san);
-          break;
-        }
-      }
-    }
-    return sans;
+    return reconstructSansFromHistory(mainLineHistory);
   }, [mainLineHistory]);
 
   const isExploringVariation = activeTab === "report" && mainLineHistory !== null &&
@@ -1156,31 +1004,35 @@ function App() {
   const navigateToMainLineMove = (historyIndex: number) => {
     if (!mainLineHistory || historyIndex < 0 || historyIndex >= mainLineHistory.length) return;
     setGameHistory(mainLineHistory);
+    setGameSanList(mainLineSanMoves || []);
     setCurrentMoveIndex(historyIndex);
     setGame(new Chess(mainLineHistory[historyIndex]));
-    startAnalysis(mainLineHistory[historyIndex]);
+    handlePositionChange(mainLineHistory[historyIndex]);
   };
 
   const backToMainLine = () => {
     if (!mainLineHistory) return;
     const targetIndex = Math.min(currentMoveIndex, mainLineHistory.length - 1);
     setGameHistory(mainLineHistory);
+    setGameSanList(mainLineSanMoves || []);
     setCurrentMoveIndex(targetIndex);
     setGame(new Chess(mainLineHistory[targetIndex]));
-    startAnalysis(mainLineHistory[targetIndex]);
+    handlePositionChange(mainLineHistory[targetIndex]);
   };
 
   const loadSavedReport = async (id: string) => {
     try {
       const saved = await invoke<SavedReport>("load_report", { id });
+      const sans = reconstructSansFromHistory(saved.gameHistory);
       setGameHistory(saved.gameHistory);
+      setGameSanList(sans);
       setMainLineHistory(saved.gameHistory);
       setReportPerspective(saved.perspective);
       setPostGameReport(saved.report);
       setSavedReportId(saved.id);
       setCurrentMoveIndex(0);
       setGame(new Chess(saved.gameHistory[0]));
-      startAnalysis(saved.gameHistory[0]);
+      handlePositionChange(saved.gameHistory[0]);
       setActiveTab("report");
       setShowSavedReportsModal(false);
     } catch (e) {
@@ -1458,6 +1310,7 @@ function App() {
                 onPieceDrop: onDrop,
                 arrows: currentMoveIndex === 0 ? [] : bestMoveArrows,
                 boardOrientation: boardOrientation,
+                animationDurationInMs: 120,
               }}
             />
           </div>
@@ -1644,7 +1497,6 @@ function App() {
                 const style = getLineStyle(
                   isBlunder ? "red" : thought.multipv
                 );
-                const sanMoves = uciMovesToSan(thought.moves);
                 return (
                   <div
                     key={thought.multipv}
@@ -1680,14 +1532,13 @@ function App() {
                     <div
                       style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}
                     >
-                      {thought.moves.map((_moveVal, i) => {
-                        const san = sanMoves[i];
+                      {thought.moves.map((san, i) => {
                         if (!san) return null;
                         return (
                           <button
                             key={i}
                             className="move-chip"
-                            onClick={() => playLineToMove(thought.moves, i)}
+                            onClick={() => playLineToMove(thought.rawMoves, i)}
                             style={{
                               backgroundColor: style.chipBg,
                               color: style.text,

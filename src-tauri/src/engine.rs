@@ -365,22 +365,22 @@ impl StockfishWorker {
 // ═══════════════════════════════════════════════════════════════
 
 /// Extract the whitespace-delimited token immediately following `token` in `line`.
-fn extract_after<'a>(line: &'a str, token: &str) -> Option<&'a str> {
+pub(crate) fn extract_after<'a>(line: &'a str, token: &str) -> Option<&'a str> {
     let idx = line.find(token)?;
     let rest = &line[idx + token.len()..];
     rest.split_whitespace().next()
 }
 
-fn extract_u32(line: &str, token: &str) -> Option<u32> {
+pub(crate) fn extract_u32(line: &str, token: &str) -> Option<u32> {
     extract_after(line, token)?.parse().ok()
 }
 
-fn extract_i32(line: &str, token: &str) -> Option<i32> {
+pub(crate) fn extract_i32(line: &str, token: &str) -> Option<i32> {
     extract_after(line, token)?.parse().ok()
 }
 
 /// Extract all moves after " pv " to the end of the line.
-fn extract_pv(line: &str) -> Vec<String> {
+pub(crate) fn extract_pv(line: &str) -> Vec<String> {
     match line.find(" pv ") {
         Some(idx) => line[idx + 4..]
             .split_whitespace()

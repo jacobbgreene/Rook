@@ -1,4 +1,5 @@
 mod engine;
+mod live_engine;
 
 use rig::providers::{openai, gemini};
 use rig::providers::gemini::completion::gemini_api_types::{
@@ -247,6 +248,7 @@ struct ApiKeys {
 
 struct AppState {
     api_keys: Mutex<ApiKeys>,
+    live_engine: live_engine::LiveEngineHandle,
 }
 
 // ── Report Persistence ───────────────────────────────────────
@@ -716,6 +718,23 @@ fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Optio
     Ok(None)
 }
 
+// ── Live Engine Commands ──────────────────────────────────────
+
+#[tauri::command]
+async fn live_engine_set_fen(fen: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.live_engine.set_fen(fen).await
+}
+
+#[tauri::command]
+async fn live_engine_new_game(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.live_engine.new_game().await
+}
+
+#[tauri::command]
+async fn live_engine_stop(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.live_engine.stop().await
+}
+
 // ── Stockfish Worker Pool Command ─────────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -779,11 +798,21 @@ async fn run_engine_pass(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { api_keys: Mutex::new(ApiKeys::default()) })
         .setup(|app| {
-            let path = get_keys_file_path(app.handle());
-            let keys = load_keys_from_disk(&path);
-            *app.state::<AppState>().api_keys.lock().unwrap() = keys;
+            let handle = app.handle().clone();
+
+            // Load persisted API keys
+            let keys_path = get_keys_file_path(&handle);
+            let keys = load_keys_from_disk(&keys_path);
+
+            // Spawn persistent live Stockfish process
+            let sf_path = engine::find_stockfish_path().unwrap_or_else(|_| "stockfish".to_string());
+            let live_engine = live_engine::spawn_live_engine(handle, sf_path);
+
+            app.manage(AppState {
+                api_keys: Mutex::new(keys),
+                live_engine,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -802,6 +831,9 @@ pub fn run() {
             delete_report,
             check_report_exists,
             run_engine_pass,
+            live_engine_set_fen,
+            live_engine_new_game,
+            live_engine_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
