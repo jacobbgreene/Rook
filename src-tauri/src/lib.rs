@@ -1,4 +1,6 @@
 mod engine;
+mod lc0_config;
+mod lc0_engine;
 mod live_engine;
 
 use rig::providers::{openai, gemini};
@@ -40,6 +42,29 @@ struct CriticalMomentData {
     category: String,
     best_move_san: String,
     best_line: Vec<String>,
+    lc0_wdl: Option<Vec<u32>>,
+    lc0_top_move: Option<String>,
+    lc0_line: Option<Vec<String>>,
+}
+
+fn build_lc0_context(m: &CriticalMomentData) -> String {
+    if let Some(ref wdl) = m.lc0_wdl {
+        if wdl.len() == 3 {
+            let w = wdl[0] as f64 / 10.0;
+            let d = wdl[1] as f64 / 10.0;
+            let l = wdl[2] as f64 / 10.0;
+            let line_str = m.lc0_line.as_ref()
+                .map(|l| l.join(" "))
+                .unwrap_or_default();
+            return format!(
+                "\nLeela Chess Zero assessment: {:.1}% win, {:.1}% draw, {:.1}% loss.\n\
+                 Lc0's preferred continuation: {}\n\
+                 Use this strategic perspective to enrich your explanation.",
+                w, d, l, line_str,
+            );
+        }
+    }
+    String::new()
 }
 
 fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> String {
@@ -59,6 +84,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
     let is_great_move = m.category == "great_move";
     let is_critical = m.category == "critical";
 
+    let lc0_ctx = build_lc0_context(m);
+
     if is_player_move && is_critical {
         format!(
             "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
@@ -67,7 +94,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
             Evaluation after: {ea:+.2} pawns\n\
             Evaluation gain: {gain:.1} pawns — classified as {cat}\n\
-            Stockfish's top line: {line}\n\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
             In 2-3 concise sentences, explain to the player:\n\
             1. Why your move {san} was critical — this was the only strong continuation in a complex position, and you found it.\n\
             2. What made the alternatives so much worse and why this position demanded precise play.\n\
@@ -81,6 +109,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             gain = -m.eval_drop,
             cat = category_desc,
             line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
         )
     } else if is_player_move && is_great_move {
         format!(
@@ -90,7 +119,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
             Evaluation after: {ea:+.2} pawns\n\
             Evaluation gain: {gain:.1} pawns — classified as {cat}\n\
-            Stockfish's top line: {line}\n\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
             In 2-3 concise sentences, explain to the player:\n\
             1. Why your move {san} was excellent — what tactical or strategic idea it exploited.\n\
             2. What positional or tactical principle made this the strongest choice.\n\
@@ -104,6 +134,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             gain = -m.eval_drop,
             cat = category_desc,
             line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
         )
     } else if is_player_move {
         format!(
@@ -114,7 +145,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             Evaluation after: {ea:+.2} pawns\n\
             Evaluation drop: {drop:.1} pawns — classified as {cat}\n\
             Stockfish's preferred move: {best}\n\
-            Stockfish's top line: {line}\n\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
             In 2-3 concise sentences, explain to the player:\n\
             1. Why your move {san} was {cat} — what tactical or strategic principle was violated.\n\
             2. What you should have played instead ({best}) and the key idea behind that continuation.\n\
@@ -129,6 +161,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             cat = category_desc,
             best = m.best_move_san,
             line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
         )
     } else {
         format!(
@@ -137,7 +170,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             Your opponent ({opponent}) played: {san} (Move {num})\n\
             This was {cat} by your opponent — evaluation before: {eb:+.2}, after: {ea:+.2} (drop: {drop:.1} pawns)\n\
             Stockfish's preferred move for the opponent was: {best}\n\
-            Stockfish's top line: {line}\n\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
             In 2-3 concise sentences, explain to the {perspective} player:\n\
             1. Why the opponent's move {san} was {cat} and what opportunity it created for you.\n\
             2. How you should look to exploit this type of mistake — what continuation or idea should you be alert for?\n\
@@ -153,6 +187,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             cat = category_desc,
             best = m.best_move_san,
             line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
         )
     }
 }
@@ -175,26 +210,35 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
         result = result_context,
     );
 
+    let has_lc0 = moments.iter().any(|m| m.lc0_wdl.is_some());
+    if has_lc0 {
+        prompt += "Note: Leela Chess Zero (Lc0) strategic analysis was used alongside Stockfish for deeper positional insight.\n\n";
+    }
+
     for m in moments {
         let whose = if m.side == perspective {
             "Your move".to_string()
         } else {
             format!("Opponent's ({}) move", opponent)
         };
+        let wdl_str = m.lc0_wdl.as_ref()
+            .filter(|w| w.len() == 3)
+            .map(|w| format!(" [Lc0 WDL: {:.1}%/{:.1}%/{:.1}%]", w[0] as f64 / 10.0, w[1] as f64 / 10.0, w[2] as f64 / 10.0))
+            .unwrap_or_default();
         if m.category == "critical" {
             prompt += &format!(
-                "- Move {} ({}): Played {}. Category: critical, eval gain: {:.1} pawns. Found the only strong move in a complex position.\n",
-                m.move_number, whose, m.move_san, -m.eval_drop,
+                "- Move {} ({}): Played {}. Category: critical, eval gain: {:.1} pawns. Found the only strong move in a complex position.{}\n",
+                m.move_number, whose, m.move_san, -m.eval_drop, wdl_str,
             );
         } else if m.category == "great_move" {
             prompt += &format!(
-                "- Move {} ({}): Played {}. Category: great_move, eval gain: {:.1} pawns.\n",
-                m.move_number, whose, m.move_san, -m.eval_drop,
+                "- Move {} ({}): Played {}. Category: great_move, eval gain: {:.1} pawns.{}\n",
+                m.move_number, whose, m.move_san, -m.eval_drop, wdl_str,
             );
         } else {
             prompt += &format!(
-                "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.\n",
-                m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop,
+                "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.{}\n",
+                m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop, wdl_str,
             );
         }
     }
@@ -249,6 +293,7 @@ struct ApiKeys {
 struct AppState {
     api_keys: Mutex<ApiKeys>,
     live_engine: live_engine::LiveEngineHandle,
+    config: Mutex<lc0_config::AppConfig>,
 }
 
 // ── Report Persistence ───────────────────────────────────────
@@ -794,6 +839,79 @@ async fn run_engine_pass(
     result
 }
 
+// ── Lc0 Config Commands ───────────────────────────────────────
+
+#[tauri::command]
+fn get_app_config(state: tauri::State<'_, AppState>) -> Result<lc0_config::AppConfig, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    Ok(config.clone())
+}
+
+#[tauri::command]
+fn set_engine_mode(mode: String, state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    config.engine_mode = match mode.as_str() {
+        "hybrid" => lc0_config::EngineMode::Hybrid,
+        _ => lc0_config::EngineMode::StockfishOnly,
+    };
+    config.setup_complete = true;
+    lc0_config::save_config(&app, &config);
+    Ok(())
+}
+
+#[tauri::command]
+fn save_report_settings(
+    analysis_depth: u32,
+    include_great_moves: bool,
+    detailed_report: bool,
+    use_lc0: bool,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    config.analysis_depth = analysis_depth;
+    config.include_great_moves = include_great_moves;
+    config.detailed_report = detailed_report;
+    config.use_lc0 = use_lc0;
+    lc0_config::save_config(&app, &config);
+    Ok(())
+}
+
+#[tauri::command]
+async fn setup_lc0(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    lc0_config::setup_lc0(app.clone()).await?;
+    // Reload config into state
+    let new_config = lc0_config::load_config(&app);
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    *config = new_config;
+    Ok(())
+}
+
+#[tauri::command]
+fn check_lc0_ready(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+    let config = state.config.lock().map_err(|e| e.to_string())?;
+    Ok(lc0_config::check_lc0_ready(&config, &app))
+}
+
+#[tauri::command]
+async fn run_lc0_pass(
+    positions: Vec<String>,
+    nodes: u32,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<lc0_engine::Lc0Eval>, String> {
+    let (lc0_path, weights_path) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        let lp = lc0_config::find_lc0_path(&config, &app)
+            .ok_or("Lc0 binary not found. Run setup first.")?;
+        let wp = lc0_config::find_weights_path(&config, &app)
+            .ok_or("Lc0 weights not found. Run setup first.")?;
+        (lp, wp)
+    };
+
+    lc0_engine::run_lc0_pass(positions, nodes, &lc0_path, &weights_path, app).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -805,6 +923,9 @@ pub fn run() {
             let keys_path = get_keys_file_path(&handle);
             let keys = load_keys_from_disk(&keys_path);
 
+            // Load persisted app config
+            let config = lc0_config::load_config(&handle);
+
             // Spawn persistent live Stockfish process
             let sf_path = engine::find_stockfish_path().unwrap_or_else(|_| "stockfish".to_string());
             let live_engine = live_engine::spawn_live_engine(handle, sf_path);
@@ -812,6 +933,7 @@ pub fn run() {
             app.manage(AppState {
                 api_keys: Mutex::new(keys),
                 live_engine,
+                config: Mutex::new(config),
             });
             Ok(())
         })
@@ -834,6 +956,12 @@ pub fn run() {
             live_engine_set_fen,
             live_engine_new_game,
             live_engine_stop,
+            get_app_config,
+            set_engine_mode,
+            save_report_settings,
+            setup_lc0,
+            check_lc0_ready,
+            run_lc0_pass,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

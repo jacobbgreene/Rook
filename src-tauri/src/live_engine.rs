@@ -120,7 +120,7 @@ fn live_engine_config() -> (usize, usize) {
 // UCI → SAN Conversion
 // ═══════════════════════════════════════════════════════════════
 
-fn uci_pv_to_san(fen: &str, uci_moves: &[String]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn uci_pv_to_san(fen: &str, uci_moves: &[String]) -> (Vec<String>, Vec<String>) {
     let Ok(fen_parsed) = fen.parse::<Fen>() else {
         return (vec![], uci_moves.to_vec());
     };

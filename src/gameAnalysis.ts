@@ -18,6 +18,13 @@ export interface PositionEval {
   topLines: EngineLine[];
 }
 
+export interface Lc0Eval {
+  wdl: [number, number, number]; // win/draw/loss permille
+  scoreCp: number | null;
+  topMoveSan: string;
+  pvSan: string[];
+}
+
 export interface CriticalMoment {
   fen: string;
   moveSan: string;
@@ -29,6 +36,7 @@ export interface CriticalMoment {
   category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical" | "brilliant";
   bestMoveSan: string;
   bestLine: string[];
+  lc0Eval?: Lc0Eval;
 }
 
 export interface CriticalMomentWithExplanation extends CriticalMoment {
@@ -42,6 +50,7 @@ export interface GameAnalysisReport {
 
 export type AnalysisPhase =
   | { phase: "engine"; current: number; total: number }
+  | { phase: "lc0"; current: number; total: number; backend?: string }
   | { phase: "llm"; current: number; total: number }
   | { phase: "summary" }
   | { phase: "complete" };
@@ -196,8 +205,16 @@ export function filterCriticalMoments(
   moves: string[],
   evaluations: PositionEval[],
   includeGreatMoves: boolean = false,
+  detailed: boolean = true,
 ): CriticalMoment[] {
   const moments: CriticalMoment[] = [];
+
+  // Detailed mode uses lower thresholds to flag more moments,
+  // giving broader coverage of the game.  Standard mode uses
+  // higher thresholds so only the most impactful moments appear.
+  const thresholds = detailed
+    ? { blunder: 2.0, mistake: 1.0, inaccuracy: 0.5 }
+    : { blunder: 3.0, mistake: 1.5, inaccuracy: 0.75 };
 
   for (let i = 0; i < moves.length; i++) {
     const fenBefore = positions[i];
@@ -226,9 +243,9 @@ export function filterCriticalMoments(
     // Categorize
     let category: CriticalMoment["category"] | null = null;
     if (isTurningPoint) category = "turning_point";
-    else if (evalDrop > 3.0) category = "blunder";
-    else if (evalDrop > 1.5) category = "mistake";
-    else if (evalDrop > 0.75) category = "inaccuracy";
+    else if (evalDrop > thresholds.blunder) category = "blunder";
+    else if (evalDrop > thresholds.mistake) category = "mistake";
+    else if (evalDrop > thresholds.inaccuracy) category = "inaccuracy";
 
     // Critical move: player found the *only* strong move in a complex position.
     // The gap between the engine's top two lines is huge, meaning there was one
@@ -307,6 +324,8 @@ export async function runFullAnalysis(
   onProgress?: (phase: AnalysisPhase) => void,
   depth: number = 15,
   includeGreatMoves: boolean = false,
+  hybridMode: boolean = false,
+  detailedReport: boolean = true,
 ): Promise<GameAnalysisReport> {
   // Step 1 — Reconstruct SAN moves from the FEN history
   const sanMoves: string[] = [];
@@ -322,15 +341,47 @@ export async function runFullAnalysis(
     }
   }
 
-  // Step 2 — Engine pass: evaluate every position at fixed depth
+  // Step 2 — Engine pass: evaluate every position at fixed depth.
+  // In hybrid mode Lc0 handles the strategic deep dive, so we can
+  // reduce Stockfish depth to speed up the tactial scan.  Cap at 15
+  // to keep the pool fast while still catching tactical motifs.
+  const sfDepth = hybridMode ? Math.min(depth, 15) : depth;
   const evaluations = await runEnginePass(
     gameHistory,
-    depth,
+    sfDepth,
     (current, total) => onProgress?.({ phase: "engine", current, total }),
   );
 
   // Step 3 — Threshold filter: find critical moments
-  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations, includeGreatMoves);
+  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations, includeGreatMoves, detailedReport);
+
+  // Step 3.5 — Lc0 strategic pass (hybrid mode only)
+  if (hybridMode) {
+    const criticalFens = criticalMoments.map(m => m.fen);
+    if (criticalFens.length > 0) {
+      onProgress?.({ phase: "lc0", current: 0, total: criticalFens.length });
+      const lc0Unlisten = await listen<{ current: number; total: number }>(
+        "lc0-eval-progress", (event) => {
+          const p = event.payload as { current: number; total: number; backend?: string };
+          onProgress?.({ phase: "lc0", current: p.current, total: p.total, backend: p.backend });
+        }
+      );
+      try {
+        const lc0Results = await invoke<Lc0Eval[]>("run_lc0_pass", {
+          positions: criticalFens, nodes: 75000,
+        });
+        for (let i = 0; i < criticalMoments.length; i++) {
+          if (lc0Results[i]) {
+            criticalMoments[i].lc0Eval = lc0Results[i];
+          }
+        }
+      } catch (e) {
+        console.warn("Lc0 pass failed, continuing without:", e);
+      } finally {
+        lc0Unlisten();
+      }
+    }
+  }
 
   // Step 4 — LLM explanation only for the player's critical moments
   const playerMoments = criticalMoments.filter(m => m.side === perspective);
@@ -338,8 +389,18 @@ export async function runFullAnalysis(
   for (let i = 0; i < playerMoments.length; i++) {
     onProgress?.({ phase: "llm", current: i + 1, total: playerMoments.length });
     try {
+      // Build the moment payload — include Lc0 data if available
+      const momentPayload: Record<string, unknown> = { ...playerMoments[i] };
+      if (playerMoments[i].lc0Eval) {
+        momentPayload.lc0Wdl = Array.from(playerMoments[i].lc0Eval!.wdl);
+        momentPayload.lc0TopMove = playerMoments[i].lc0Eval!.topMoveSan;
+        momentPayload.lc0Line = playerMoments[i].lc0Eval!.pvSan;
+      }
+      // Remove the nested lc0Eval before sending (Rust expects flat fields)
+      delete momentPayload.lc0Eval;
+
       const explanation = await invoke<string>("explain_critical_moment", {
-        moment: playerMoments[i],
+        moment: momentPayload,
         perspective,
       });
       explained.push({ ...playerMoments[i], llmExplanation: explanation });
@@ -355,10 +416,23 @@ export async function runFullAnalysis(
   const gameResult = determineGameResult(gameHistory, perspective);
   onProgress?.({ phase: "summary" });
   let thematicSummary = "";
+
+  // Build moments payload with Lc0 data for the summary too
+  const momentsForSummary = criticalMoments.map(m => {
+    const payload: Record<string, unknown> = { ...m };
+    if (m.lc0Eval) {
+      payload.lc0Wdl = Array.from(m.lc0Eval.wdl);
+      payload.lc0TopMove = m.lc0Eval.topMoveSan;
+      payload.lc0Line = m.lc0Eval.pvSan;
+    }
+    delete payload.lc0Eval;
+    return payload;
+  });
+
   if (criticalMoments.length > 0) {
     try {
       thematicSummary = await invoke<string>("generate_thematic_summary", {
-        moments: criticalMoments,
+        moments: momentsForSummary,
         perspective,
         includeGreatMoves,
         gameResult,

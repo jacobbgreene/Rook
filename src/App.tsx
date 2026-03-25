@@ -4,6 +4,7 @@ import { Chessboard } from "react-chessboard";
 import { invoke } from "@tauri-apps/api/core";
 import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult } from "./gameAnalysis";
 import { useLiveEngine } from "./useLiveEngine";
+import { SetupWizard } from "./SetupWizard";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
 
@@ -28,6 +29,17 @@ interface ApiKeyStatus {
   openai_set: boolean;
   openai_hint: string;
   gemini_pro_enabled: boolean;
+}
+
+interface AppConfig {
+  engineMode: "stockfish_only" | "hybrid";
+  lc0Path: string | null;
+  weightsPath: string | null;
+  setupComplete: boolean;
+  analysisDepth: number;
+  includeGreatMoves: boolean;
+  detailedReport: boolean;
+  useLc0: boolean;
 }
 
 const SkipBackIcon = () => (
@@ -270,6 +282,12 @@ function App() {
   const [includeGreatMoves, setIncludeGreatMoves] = useState(false);
   const [analysisDepth, setAnalysisDepth] = useState<number>(12);
   const [mainLineHistory, setMainLineHistory] = useState<string[] | null>(null);
+  const [useLc0, setUseLc0] = useState(false);
+  const [detailedReport, setDetailedReport] = useState(true);
+
+  // App config for engine mode
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   // Save/load report state
   const [savedReportId, setSavedReportId] = useState<string | null>(null);
@@ -320,6 +338,17 @@ function App() {
 
   useEffect(() => {
     loadApiKeys();
+    invoke<AppConfig>("get_app_config")
+      .then((config) => {
+        setAppConfig(config);
+        setConfigLoaded(true);
+        // Restore persistent report settings
+        if (config.analysisDepth) setAnalysisDepth(config.analysisDepth);
+        setIncludeGreatMoves(config.includeGreatMoves ?? false);
+        setDetailedReport(config.detailedReport ?? true);
+        setUseLc0(config.useLc0 ?? false);
+      })
+      .catch(() => setConfigLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -473,6 +502,8 @@ function App() {
         (phase) => setAnalysisProgress(phase),
         analysisDepth,
         includeGreatMoves,
+        useLc0,
+        detailedReport,
       );
       setPostGameReport(report);
       setCurrentMoveIndex(1);
@@ -637,6 +668,7 @@ function App() {
     setAnalysisDepth(12);
     setSavedReportId(null);
     setSavedReportMeta(null);
+    setUseLc0(false);
   };
 
   const [importInput, setImportInput] = useState("");
@@ -708,6 +740,7 @@ function App() {
     setAnalysisDepth(12);
     setSavedReportId(null);
     setSavedReportMeta(null);
+    setUseLc0(false);
   };
 
   const playLineToMove = (uciMoves: string[], targetIndex: number) => {
@@ -1260,6 +1293,15 @@ function App() {
     );
   };
 
+  // Show setup wizard on first launch
+  if (configLoaded && appConfig && !appConfig.setupComplete) {
+    return (
+      <SetupWizard onComplete={() => {
+        invoke<AppConfig>("get_app_config").then(setAppConfig);
+      }} />
+    );
+  }
+
   return (
     <main className="container">
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
@@ -1580,6 +1622,20 @@ function App() {
                 {savedReportMeta && activeTab !== "report" && (
                   <span className="saved-indicator" />
                 )}
+                {postGameReport && activeTab === "report" && (
+                  <span
+                    className="tab-close"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPostGameReport(null);
+                      setIsPostGameLoading(false);
+                      setMainLineHistory(null);
+                    }}
+                    title="Close report"
+                  >
+                    &times;
+                  </span>
+                )}
               </button>
             </div>
 
@@ -1666,6 +1722,25 @@ function App() {
                           <div className="progress-label">Evaluating positions with Stockfish...</div>
                           <div className="progress-bar-track">
                             <div className="progress-bar-fill" style={{ width: `${(analysisProgress.current / analysisProgress.total) * 100}%` }} />
+                          </div>
+                          <div className="progress-count">{analysisProgress.current} / {analysisProgress.total} positions</div>
+                        </>
+                      )}
+                      {analysisProgress.phase === "lc0" && (
+                        <>
+                          <div className="progress-label">
+                            Lc0 strategic analysis...
+                            {analysisProgress.backend && (
+                              <span className="lc0-backend-badge" data-gpu={!["eigen", "trivial", "random", "unknown"].includes(analysisProgress.backend)}>
+                                {analysisProgress.backend}
+                              </span>
+                            )}
+                          </div>
+                          {analysisProgress.backend && ["eigen", "trivial", "random"].includes(analysisProgress.backend) && (
+                            <div className="lc0-cpu-warning">CPU fallback — install Lc0 with OpenCL for GPU acceleration</div>
+                          )}
+                          <div className="progress-bar-track">
+                            <div className="progress-bar-fill lc0-fill" style={{ width: `${analysisProgress.total > 0 ? (analysisProgress.current / analysisProgress.total) * 100 : 0}%` }} />
                           </div>
                           <div className="progress-count">{analysisProgress.current} / {analysisProgress.total} positions</div>
                         </>
@@ -1767,6 +1842,36 @@ function App() {
                 <span className="toggle-knob" />
               </button>
             </div>
+            {appConfig?.engineMode === "hybrid" && (
+              <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+                <div className="model-toggle-label">
+                  <span className="model-toggle-title">Use Lc0 analysis</span>
+                  <span className="model-toggle-desc">Add Leela Chess Zero strategic insight and WDL probabilities</span>
+                </div>
+                <button
+                  className={`toggle-switch ${useLc0 ? "toggle-on" : ""}`}
+                  onClick={() => setUseLc0(!useLc0)}
+                  role="switch"
+                  aria-checked={useLc0}
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+            )}
+            <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+              <div className="model-toggle-label">
+                <span className="model-toggle-title">Detailed report</span>
+                <span className="model-toggle-desc">Lower thresholds to flag more moments for broader game coverage</span>
+              </div>
+              <button
+                className={`toggle-switch ${detailedReport ? "toggle-on" : ""}`}
+                onClick={() => setDetailedReport(!detailedReport)}
+                role="switch"
+                aria-checked={detailedReport}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </div>
             <p style={{ margin: "16px 0 8px 0", fontSize: "0.85rem", color: "#aaa" }}>
               Analysis depth
             </p>
@@ -1792,7 +1897,16 @@ function App() {
             </div>
             <button
               className="action-button"
-              onClick={() => { setShowReportSetup(false); requestPostGameReport(); }}
+              onClick={() => {
+                setShowReportSetup(false);
+                requestPostGameReport();
+                invoke("save_report_settings", {
+                  analysisDepth: analysisDepth,
+                  includeGreatMoves: includeGreatMoves,
+                  detailedReport: detailedReport,
+                  useLc0: useLc0,
+                }).catch(() => {});
+              }}
               style={{ width: "100%", marginTop: "16px", padding: "10px", justifyContent: "center" }}
             >
               <ReportIcon /> Analyze Game
@@ -1938,6 +2052,31 @@ function App() {
                   <button onClick={() => handleSaveKey("openai")}>Save</button>
                 </div>
               )}
+            </div>
+
+            {/* Engine Mode Section */}
+            <div className="api-key-section">
+              <h4>Engine Mode</h4>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                <span style={{ fontSize: "0.85rem", color: "#ccc" }}>
+                  {appConfig?.engineMode === "hybrid" ? "Stockfish + Lc0 (Advanced)" : "Stockfish Only (Standard)"}
+                </span>
+                <button
+                  className="action-button"
+                  onClick={async () => {
+                    if (appConfig?.engineMode === "hybrid") {
+                      await invoke("set_engine_mode", { mode: "stockfish_only" });
+                    } else {
+                      await invoke("set_engine_mode", { mode: "hybrid" });
+                    }
+                    const config = await invoke<AppConfig>("get_app_config");
+                    setAppConfig(config);
+                  }}
+                  style={{ flex: "none", padding: "6px 12px", fontSize: "0.78rem" }}
+                >
+                  {appConfig?.engineMode === "hybrid" ? "Switch to Standard" : "Switch to Advanced"}
+                </button>
+              </div>
             </div>
 
             {/* Info Box */}
