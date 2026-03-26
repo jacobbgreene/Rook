@@ -40,6 +40,8 @@ pub struct AppConfig {
     pub detailed_report: bool,
     #[serde(default)]
     pub use_lc0: bool,
+    #[serde(default)]
+    pub include_opportunities: bool,
 }
 
 fn default_depth() -> u32 { 12 }
@@ -56,6 +58,7 @@ impl Default for AppConfig {
             include_great_moves: false,
             detailed_report: true,
             use_lc0: false,
+            include_opportunities: false,
         }
     }
 }

@@ -33,7 +33,7 @@ export interface CriticalMoment {
   evalBefore: number; // pawns, from white's perspective
   evalAfter: number;
   evalDrop: number; // positive = player worsened their position
-  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical" | "brilliant";
+  category: "blunder" | "mistake" | "inaccuracy" | "turning_point" | "great_move" | "critical" | "brilliant" | "opportunity" | "golden_opportunity";
   bestMoveSan: string;
   bestLine: string[];
   lc0Eval?: Lc0Eval;
@@ -220,6 +220,8 @@ export function filterCriticalMoments(
   evaluations: PositionEval[],
   includeGreatMoves: boolean = false,
   detailed: boolean = true,
+  includeOpportunities: boolean = false,
+  perspective?: string,
 ): CriticalMoment[] {
   const moments: CriticalMoment[] = [];
 
@@ -300,19 +302,45 @@ export function filterCriticalMoments(
       }
     }
 
+    // Opportunity detection: opponent made a mistake/blunder that benefits the player
+    if (!category && includeOpportunities && perspective && side !== perspective) {
+      // evalDrop is from the mover's perspective (positive = bad for mover)
+      // For opponent's moves, a large evalDrop means the opponent hurt themselves
+      if (evalDrop > thresholds.blunder) {
+        category = "golden_opportunity";
+      } else if (evalDrop > thresholds.mistake) {
+        category = "opportunity";
+      }
+    }
+
     if (!category) continue;
 
-    // Best move from Stockfish's top line
-    const topLine = evalBefore.topLines[0];
+    const isOpportunity = category === "opportunity" || category === "golden_opportunity";
+
+    // For opportunities, show the position AFTER the opponent's mistake
+    // and the player's best response from that position
+    let momentFen: string;
     let bestMoveSan = "";
     let bestLineSan: string[] = [];
-    if (topLine?.pv.length) {
-      bestLineSan = uciToSan(fenBefore, topLine.pv);
-      bestMoveSan = bestLineSan[0] || "";
+
+    if (isOpportunity && positions[i + 1] && evaluations[i + 1]) {
+      momentFen = positions[i + 1];
+      const responseTopLine = evaluations[i + 1].topLines[0];
+      if (responseTopLine?.pv.length) {
+        bestLineSan = uciToSan(positions[i + 1], responseTopLine.pv);
+        bestMoveSan = bestLineSan[0] || "";
+      }
+    } else {
+      momentFen = fenBefore;
+      const topLine = evalBefore.topLines[0];
+      if (topLine?.pv.length) {
+        bestLineSan = uciToSan(fenBefore, topLine.pv);
+        bestMoveSan = bestLineSan[0] || "";
+      }
     }
 
     moments.push({
-      fen: fenBefore,
+      fen: momentFen,
       moveSan: moves[i],
       moveNumber,
       side,
@@ -345,6 +373,7 @@ export async function runFullAnalysis(
   includeGreatMoves: boolean = false,
   hybridMode: boolean = false,
   detailedReport: boolean = true,
+  includeOpportunities: boolean = false,
 ): Promise<FullAnalysisResult> {
   // Step 1 — Reconstruct SAN moves from the FEN history
   const sanMoves: string[] = [];
@@ -372,7 +401,7 @@ export async function runFullAnalysis(
   );
 
   // Step 3 — Threshold filter: find critical moments
-  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations, includeGreatMoves, detailedReport);
+  const criticalMoments = filterCriticalMoments(gameHistory, sanMoves, evaluations, includeGreatMoves, detailedReport, includeOpportunities, perspective);
 
   // Step 3.5 — Lc0 strategic pass (hybrid mode only)
   if (hybridMode) {
@@ -402,8 +431,12 @@ export async function runFullAnalysis(
     }
   }
 
-  // Step 4 — LLM explanation only for the player's critical moments
-  const playerMoments = criticalMoments.filter(m => m.side === perspective);
+  // Step 4 — LLM explanation for player's critical moments + opportunities
+  const playerMoments = criticalMoments.filter(m =>
+    m.side === perspective ||
+    m.category === "opportunity" ||
+    m.category === "golden_opportunity"
+  );
   const explained: CriticalMomentWithExplanation[] = [];
   for (let i = 0; i < playerMoments.length; i++) {
     onProgress?.({ phase: "llm", current: i + 1, total: playerMoments.length });
@@ -454,6 +487,7 @@ export async function runFullAnalysis(
         moments: momentsForSummary,
         perspective,
         includeGreatMoves,
+        includeOpportunities,
         gameResult,
       });
     } catch (e) {

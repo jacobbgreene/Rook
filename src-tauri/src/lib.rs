@@ -4,9 +4,6 @@ mod lc0_engine;
 mod live_engine;
 
 use rig::providers::{openai, gemini};
-use rig::providers::gemini::completion::gemini_api_types::{
-    AdditionalParameters, GenerationConfig, ThinkingConfig, ThinkingLevel,
-};
 use rig::completion::Prompt;
 use rig::client::CompletionClient;
 use serde::{Deserialize, Serialize};
@@ -16,16 +13,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
-
-const CHESS_COACH_PROMPT: &str = include_str!("prompts/chess-coach.md");
-
-#[derive(Debug, Deserialize, Serialize)]
-struct MoveAnnotation {
-    #[serde(rename = "moveNumber")]
-    move_number: u32,
-    side: String,
-    comment: String,
-}
 
 // ── Context-Injection Pipeline types ──────────────────────────
 
@@ -75,6 +62,8 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
         "turning_point" => "a critical turning point",
         "great_move" => "a great move",
         "critical" => "a critical move",
+        "opportunity" => "a mistake by the opponent (an opportunity for you)",
+        "golden_opportunity" => "a serious blunder by the opponent (a golden opportunity for you)",
         _ => "a notable moment",
     };
 
@@ -192,7 +181,7 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
     }
 }
 
-fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str) -> String {
+fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str, include_opportunities: bool) -> String {
     let opponent = if perspective == "white" { "black" } else { "white" };
 
     let result_context = match game_result {
@@ -235,6 +224,12 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
                 "- Move {} ({}): Played {}. Category: great_move, eval gain: {:.1} pawns.{}\n",
                 m.move_number, whose, m.move_san, -m.eval_drop, wdl_str,
             );
+        } else if m.category == "opportunity" || m.category == "golden_opportunity" {
+            let label = if m.category == "golden_opportunity" { "golden opportunity" } else { "opportunity" };
+            prompt += &format!(
+                "- Move {} ({}): Opponent played {}. Category: {} — eval swing of {:.1} pawns in your favor. Best response: {}.{}\n",
+                m.move_number, whose, m.move_san, label, m.eval_drop, m.best_move_san, wdl_str,
+            );
         } else {
             prompt += &format!(
                 "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.{}\n",
@@ -243,26 +238,32 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
         }
     }
 
+    let opp_instruction = if include_opportunities {
+        "\n- Comment on whether you capitalized on the opportunities your opponent gave you, or if you missed chances to seize the advantage"
+    } else {
+        ""
+    };
+
     if include_great_moves {
         prompt += &format!(
             "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
             - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
             - Note any strong moves or sound tactical/positional decisions the player made\n\
-            - If there were mistakes, identify the key patterns to work on\n\
+            - If there were mistakes, identify the key patterns to work on{}\n\
             - Suggest one concrete area for improvement\n\
             Keep the tone direct and factual — recognize good play without excessive praise.\n\
             Address the player directly as \"you\".",
-            perspective
+            perspective, opp_instruction,
         );
     } else {
         prompt += &format!(
             "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
             - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
             - Identify your most common types of errors and recurring patterns\n\
-            - Note if you missed opportunities to capitalize on your opponent's mistakes\n\
+            - Note if you missed opportunities to capitalize on your opponent's mistakes{}\n\
             - Suggest one specific, actionable area to focus on for improvement\n\
             Address the player directly as \"you\".",
-            perspective
+            perspective, opp_instruction,
         );
     }
 
@@ -503,100 +504,6 @@ async fn explain_move(
     }
 }
 
-#[tauri::command]
-async fn deep_analysis(
-    pgn: String,
-    current_fen: String,
-    evaluation: String,
-    top_lines: String,
-    perspective: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    // Resolve keys: user key preferred, env var fallback
-    // Track whether key is user-provided for model upgrade
-    let (gemini_key, gemini_is_user, use_pro, openai_key, openai_is_user) = {
-        let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-        let gemini_user = keys.gemini_api_key.clone().unwrap_or_default();
-        let openai_user = keys.openai_api_key.clone().unwrap_or_default();
-        let g_is_user = !gemini_user.is_empty();
-        let o_is_user = !openai_user.is_empty();
-        let g_key = if g_is_user { gemini_user } else { env::var("GEMINI_API_KEY").unwrap_or_default() };
-        let o_key = if o_is_user { openai_user } else { env::var("OPENAI_API_KEY").unwrap_or_default() };
-        (g_key, g_is_user, keys.use_gemini_pro, o_key, o_is_user)
-    };
-
-    if gemini_key.is_empty() && openai_key.is_empty() {
-        return Ok("No API key found. Click the key icon above to add your API key, or set the GEMINI_API_KEY environment variable for a free AI coach.".to_string());
-    }
-
-    let preamble = format!(
-        "{}\n\nYou are providing a deep game analysis. The user is playing as {}. \
-        Return ONLY a JSON array of annotation objects, with no other text. \
-        Each object has: {{\"moveNumber\": <number>, \"side\": \"white\" or \"black\", \"comment\": \"<your insight>\"}}. \
-        Annotate 4-8 strategically significant moves. Focus on turning points, mistakes, critical moves, \
-        and key strategic decisions. Use standard algebraic notation when referencing moves.",
-        CHESS_COACH_PROMPT, perspective
-    );
-
-    let prompt_text = format!(
-        "Analyze this game and annotate the most important moves:\n\nPGN: {}\n\nCurrent FEN: {}\nStockfish Evaluation: {}\nTop Engine Lines:\n{}",
-        pgn, current_fen, evaluation, top_lines
-    );
-
-    let raw_response = if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key).unwrap();
-        if gemini_is_user {
-            // User key → thinking enabled; Pro model if toggled on
-            let model = if use_pro { "gemini-3.1-pro-preview" } else { "gemini-3-flash-preview" };
-            let thinking_cfg = GenerationConfig {
-                thinking_config: Some(ThinkingConfig {
-                    thinking_budget: None,
-                    thinking_level: Some(ThinkingLevel::High),
-                    include_thoughts: None,
-                }),
-                ..Default::default()
-            };
-            let params = AdditionalParameters::default().with_config(thinking_cfg);
-            let agent = client.agent(model)
-                .preamble(&preamble)
-                .additional_params(serde_json::to_value(params).unwrap())
-                .build();
-            agent.prompt(&prompt_text).await.map_err(|e| format!("Gemini Error: {}", e))?
-        } else {
-            // Env var fallback → Gemini 3 Flash without thinking
-            let agent = client.agent("gemini-3-flash-preview")
-                .preamble(&preamble)
-                .build();
-            agent.prompt(&prompt_text).await.map_err(|e| format!("Gemini Error: {}", e))?
-        }
-    } else {
-        // User key → premium reasoning model; env var → standard model
-        let model = if openai_is_user { "o4-mini" } else { openai::GPT_4O };
-        let client = openai::Client::new(&openai_key).unwrap();
-        let agent = client.agent(model)
-            .preamble(&preamble)
-            .build();
-        agent.prompt(&prompt_text).await.map_err(|e| format!("OpenAI Error: {}", e))?
-    };
-
-    // Strip markdown code fences if present
-    let cleaned = raw_response.trim();
-    let cleaned = if cleaned.starts_with("```json") {
-        cleaned.trim_start_matches("```json").trim_end_matches("```").trim()
-    } else if cleaned.starts_with("```") {
-        cleaned.trim_start_matches("```").trim_end_matches("```").trim()
-    } else {
-        cleaned
-    };
-
-    // Validate and re-serialize clean JSON
-    let annotations: Vec<MoveAnnotation> = serde_json::from_str(cleaned)
-        .map_err(|e| format!("Failed to parse AI response as JSON: {}. Raw response: {}", e, &raw_response[..raw_response.len().min(500)]))?;
-
-    serde_json::to_string(&annotations)
-        .map_err(|e| format!("Failed to serialize annotations: {}", e))
-}
-
 // ── Context-Injection Pipeline commands ───────────────────────
 
 #[tauri::command]
@@ -634,6 +541,7 @@ async fn generate_thematic_summary(
     moments: Vec<CriticalMomentData>,
     perspective: String,
     include_great_moves: Option<bool>,
+    include_opportunities: Option<bool>,
     game_result: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
@@ -644,7 +552,7 @@ async fn generate_thematic_summary(
     }
 
     let result_str = game_result.as_deref().unwrap_or("unknown");
-    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str);
+    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false));
     let preamble = "You are a chess coach writing a concise post-game summary. Focus on actionable patterns the player can improve.";
 
     if !gemini_key.is_empty() {
@@ -867,6 +775,7 @@ fn save_report_settings(
     include_great_moves: bool,
     detailed_report: bool,
     use_lc0: bool,
+    include_opportunities: bool,
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -875,6 +784,7 @@ fn save_report_settings(
     config.include_great_moves = include_great_moves;
     config.detailed_report = detailed_report;
     config.use_lc0 = use_lc0;
+    config.include_opportunities = include_opportunities;
     lc0_config::save_config(&app, &config);
     Ok(())
 }
@@ -942,7 +852,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             explain_move,
-            deep_analysis,
             get_api_keys,
             save_api_key,
             remove_api_key,

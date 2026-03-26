@@ -2,7 +2,16 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { invoke } from "@tauri-apps/api/core";
-import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult, PositionEval } from "./gameAnalysis";
+import {
+  runFullAnalysis,
+  GameAnalysisReport,
+  AnalysisPhase,
+  SavedReport,
+  SavedReportMeta,
+  computeGameHash,
+  determineGameResult,
+  PositionEval,
+} from "./gameAnalysis";
 import { useLiveEngine } from "./useLiveEngine";
 import { SetupWizard } from "./SetupWizard";
 import ReactMarkdown from "react-markdown";
@@ -15,12 +24,6 @@ interface Arrow {
   startSquare: string;
   endSquare: string;
   color: string;
-}
-
-interface MoveAnnotation {
-  moveNumber: number;
-  side: "white" | "black";
-  comment: string;
 }
 
 interface ApiKeyStatus {
@@ -40,6 +43,7 @@ interface AppConfig {
   includeGreatMoves: boolean;
   detailedReport: boolean;
   useLc0: boolean;
+  includeOpportunities: boolean;
 }
 
 const SkipBackIcon = () => (
@@ -151,23 +155,6 @@ const CoachIcon = () => (
     <path d="M12 12l-9.46 3.25" />
   </svg>
 );
-const DeepAnalysisIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <circle cx="11" cy="11" r="8" />
-    <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    <line x1="11" y1="8" x2="11" y2="14" />
-    <line x1="8" y1="11" x2="14" y2="11" />
-  </svg>
-);
 const ReportIcon = () => (
   <svg
     width="16"
@@ -230,19 +217,6 @@ const EyeOffIcon = () => (
     <line x1="1" y1="1" x2="23" y2="23" />
   </svg>
 );
-const StarIcon = () => (
-  <svg
-    width="12"
-    height="12"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    stroke="currentColor"
-    strokeWidth="1"
-  >
-    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-  </svg>
-);
-
 function App() {
   const [game, setGame] = useState(new Chess());
   const [gameHistory, setGameHistory] = useState<string[]>([new Chess().fen()]);
@@ -262,9 +236,9 @@ function App() {
   } = useLiveEngine();
   const [coachMessage, setCoachMessage] = useState("");
   const [isCoachLoading, setIsCoachLoading] = useState(false);
-  const [deepAnalysisAnnotations, setDeepAnalysisAnnotations] = useState<MoveAnnotation[] | null>(null);
-  const [isDeepAnalysisLoading, setIsDeepAnalysisLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<"strategize" | "analysis" | "report">("strategize");
+  const [activeTab, setActiveTab] = useState<
+    "strategize" | "analysis" | "report"
+  >("strategize");
 
   // API Key management state
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
@@ -275,17 +249,24 @@ function App() {
   const [showOpenaiKey, setShowOpenaiKey] = useState(false);
 
   // Post-game report state
-  const [postGameReport, setPostGameReport] = useState<GameAnalysisReport | null>(null);
+  const [postGameReport, setPostGameReport] =
+    useState<GameAnalysisReport | null>(null);
   const [isPostGameLoading, setIsPostGameLoading] = useState(false);
-  const [analysisProgress, setAnalysisProgress] = useState<AnalysisPhase | null>(null);
+  const [analysisProgress, setAnalysisProgress] =
+    useState<AnalysisPhase | null>(null);
   const [showReportSetup, setShowReportSetup] = useState(false);
-  const [reportPerspective, setReportPerspective] = useState<"white" | "black">("white");
+  const [reportPerspective, setReportPerspective] = useState<"white" | "black">(
+    "white",
+  );
   const [includeGreatMoves, setIncludeGreatMoves] = useState(false);
   const [analysisDepth, setAnalysisDepth] = useState<number>(12);
   const [mainLineHistory, setMainLineHistory] = useState<string[] | null>(null);
-  const [_reportEvaluations, _setReportEvaluations] = useState<PositionEval[] | null>(null);
+  const [_reportEvaluations, _setReportEvaluations] = useState<
+    PositionEval[] | null
+  >(null);
   const [useLc0, setUseLc0] = useState(false);
   const [detailedReport, setDetailedReport] = useState(true);
+  const [includeOpportunities, setIncludeOpportunities] = useState(false);
   const [pgnResult, setPgnResult] = useState<string | undefined>(undefined);
 
   // Refs that always reflect the latest values — prevents stale closures
@@ -295,9 +276,18 @@ function App() {
   const mainLineRef = useRef<string[] | null>(null);
   const activeTabRef = useRef<string>("strategize");
 
-  const setReportEvaluations = (v: PositionEval[] | null) => { reportEvalsRef.current = v; _setReportEvaluations(v); };
-  const setMainLineHistoryTracked = (v: string[] | null) => { mainLineRef.current = v; setMainLineHistory(v); };
-  const setActiveTabTracked = (v: "strategize" | "analysis" | "report") => { activeTabRef.current = v; setActiveTab(v); };
+  const setReportEvaluations = (v: PositionEval[] | null) => {
+    reportEvalsRef.current = v;
+    _setReportEvaluations(v);
+  };
+  const setMainLineHistoryTracked = (v: string[] | null) => {
+    mainLineRef.current = v;
+    setMainLineHistory(v);
+  };
+  const setActiveTabTracked = (v: "strategize" | "analysis" | "report") => {
+    activeTabRef.current = v;
+    setActiveTab(v);
+  };
 
   // App config for engine mode
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
@@ -305,9 +295,12 @@ function App() {
 
   // Save/load report state
   const [savedReportId, setSavedReportId] = useState<string | null>(null);
-  const [savedReportMeta, setSavedReportMeta] = useState<SavedReportMeta | null>(null);
+  const [savedReportMeta, setSavedReportMeta] =
+    useState<SavedReportMeta | null>(null);
   const [showSavedReportsModal, setShowSavedReportsModal] = useState(false);
-  const [savedReportsList, setSavedReportsList] = useState<SavedReportMeta[]>([]);
+  const [savedReportsList, setSavedReportsList] = useState<SavedReportMeta[]>(
+    [],
+  );
 
   const loadApiKeys = async () => {
     try {
@@ -361,6 +354,7 @@ function App() {
         setIncludeGreatMoves(config.includeGreatMoves ?? false);
         setDetailedReport(config.detailedReport ?? true);
         setUseLc0(config.useLc0 ?? false);
+        setIncludeOpportunities(config.includeOpportunities ?? false);
       })
       .catch(() => setConfigLoaded(true));
   }, []);
@@ -387,10 +381,21 @@ function App() {
   }, [gameHistory]);
 
   // Convert a stored PositionEval + FEN into display-ready EngineThought records.
-  const positionEvalToThoughts = (ev: PositionEval, fen: string): Record<number, import("./useLiveEngine").EngineThought> => {
-    const thoughts: Record<number, import("./useLiveEngine").EngineThought> = {};
-    const formatSc = (line: { scoreCp: number | null; scoreMate: number | null }) =>
-      line.scoreMate !== null ? `M${line.scoreMate}` : line.scoreCp !== null ? (line.scoreCp / 100).toFixed(2) : "";
+  const positionEvalToThoughts = (
+    ev: PositionEval,
+    fen: string,
+  ): Record<number, import("./useLiveEngine").EngineThought> => {
+    const thoughts: Record<number, import("./useLiveEngine").EngineThought> =
+      {};
+    const formatSc = (line: {
+      scoreCp: number | null;
+      scoreMate: number | null;
+    }) =>
+      line.scoreMate !== null
+        ? `M${line.scoreMate}`
+        : line.scoreCp !== null
+          ? (line.scoreCp / 100).toFixed(2)
+          : "";
 
     for (let i = 0; i < ev.topLines.length; i++) {
       const line = ev.topLines[i];
@@ -400,9 +405,16 @@ function App() {
       for (const uci of line.pv) {
         if (uci.length < 4) break;
         try {
-          const r = g.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length >= 5 ? uci[4] : undefined });
-          if (r) sanMoves.push(r.san); else break;
-        } catch { break; }
+          const r = g.move({
+            from: uci.slice(0, 2),
+            to: uci.slice(2, 4),
+            promotion: uci.length >= 5 ? uci[4] : undefined,
+          });
+          if (r) sanMoves.push(r.san);
+          else break;
+        } catch {
+          break;
+        }
       }
       thoughts[i + 1] = {
         multipv: i + 1,
@@ -437,7 +449,12 @@ function App() {
       const idx = mainLine.indexOf(fen);
       if (idx >= 0 && evals[idx]) {
         const ev = evals[idx];
-        const score = ev.scoreMate !== null ? `M${ev.scoreMate}` : ev.scoreCp !== null ? (ev.scoreCp / 100).toFixed(2) : "";
+        const score =
+          ev.scoreMate !== null
+            ? `M${ev.scoreMate}`
+            : ev.scoreCp !== null
+              ? (ev.scoreCp / 100).toFixed(2)
+              : "";
         injectEval(score, positionEvalToThoughts(ev, fen));
         return;
       }
@@ -481,8 +498,11 @@ function App() {
 
   // Reconstruct SAN moves from a FEN history. Only used for on-demand
   // operations (deep analysis, report save) — NOT on every move.
-  const reconstructSansFromHistory = (fens: string[], endIndex?: number): string[] => {
-    const limit = endIndex ?? (fens.length - 1);
+  const reconstructSansFromHistory = (
+    fens: string[],
+    endIndex?: number,
+  ): string[] => {
+    const limit = endIndex ?? fens.length - 1;
     const sanMoves: string[] = [];
     for (let i = 0; i < limit; i++) {
       const tempGame = new Chess(fens[i]);
@@ -510,43 +530,6 @@ function App() {
     return pgn.trim();
   };
 
-  const requestDeepAnalysis = async () => {
-    if (isDeepAnalysisLoading) return;
-    setIsDeepAnalysisLoading(true);
-    setActiveTabTracked("analysis");
-    setDeepAnalysisAnnotations(null);
-
-    try {
-      const sanMoves = gameSanList.slice(0, currentMoveIndex);
-      const pgn = buildPgn(sanMoves);
-
-      const top3Lines = Object.values(engineThoughts)
-        .sort((a, b) => a.multipv - b.multipv)
-        .slice(0, 3)
-        .map(
-          (t) => `Line #${t.multipv} (Eval ${t.score}): ${t.moves.join(" ")}`,
-        )
-        .join("\n");
-
-      const response = await invoke<string>("deep_analysis", {
-        pgn: pgn || "No moves yet",
-        currentFen: game.fen(),
-        evaluation: evaluation || "N/A",
-        topLines: top3Lines || "Engine still analyzing...",
-        perspective: boardOrientation,
-      });
-
-      const annotations: MoveAnnotation[] = JSON.parse(response);
-      setDeepAnalysisAnnotations(annotations);
-    } catch (error) {
-      setDeepAnalysisAnnotations([
-        { moveNumber: 1, side: "white", comment: `Error: ${error}` },
-      ]);
-    } finally {
-      setIsDeepAnalysisLoading(false);
-    }
-  };
-
   const requestPostGameReport = async () => {
     if (isPostGameLoading) return;
     setIsPostGameLoading(true);
@@ -556,7 +539,11 @@ function App() {
     setSavedReportId(null);
     setMainLineHistoryTracked([...gameHistory]);
     setBoardOrientation(reportPerspective);
-    setAnalysisProgress({ phase: "engine", current: 0, total: gameHistory.length });
+    setAnalysisProgress({
+      phase: "engine",
+      current: 0,
+      total: gameHistory.length,
+    });
 
     try {
       const { report, evaluations } = await runFullAnalysis(
@@ -567,6 +554,7 @@ function App() {
         includeGreatMoves,
         useLc0,
         detailedReport,
+        includeOpportunities,
       );
       setPostGameReport(report);
       setReportEvaluations(evaluations);
@@ -577,8 +565,14 @@ function App() {
       // Auto-save the report
       const gameHash = computeGameHash(gameHistory);
       const sanMoves = gameSanList;
-      const openingMoves = buildPgn(sanMoves.slice(0, Math.min(sanMoves.length, 6)));
-      const result = determineGameResult(gameHistory, reportPerspective, pgnResult);
+      const openingMoves = buildPgn(
+        sanMoves.slice(0, Math.min(sanMoves.length, 6)),
+      );
+      const result = determineGameResult(
+        gameHistory,
+        reportPerspective,
+        pgnResult,
+      );
       const id = `rpt_${Date.now()}`;
       const savedReport: SavedReport = {
         id,
@@ -615,14 +609,6 @@ function App() {
     }
   };
 
-  const navigateToMove = (historyIndex: number) => {
-    if (historyIndex >= 0 && historyIndex < gameHistory.length) {
-      handlePositionChange(gameHistory[historyIndex]);
-      setCurrentMoveIndex(historyIndex);
-      setGame(new Chess(gameHistory[historyIndex]));
-    }
-  };
-
   function makeAMove(move: { from: string; to: string; promotion?: string }) {
     const gameCopy = new Chess(game.fen());
     try {
@@ -632,7 +618,10 @@ function App() {
         const currentFen = game.fen();
         if (postGameReport && activeTab === "report") {
           const matchingMoment = postGameReport.criticalMoments.find(
-            (m) => m.fen === currentFen && m.bestLine.length > 0 && m.bestLine[0] === result.san
+            (m) =>
+              m.fen === currentFen &&
+              m.bestLine.length > 0 &&
+              m.bestLine[0] === result.san,
           );
           if (matchingMoment) {
             playBestLine(currentFen, matchingMoment.bestLine, 0);
@@ -750,7 +739,6 @@ function App() {
     setCurrentMoveIndex(0);
     setBoardOrientation("white");
     setActiveTabTracked("strategize");
-    setDeepAnalysisAnnotations(null);
     setPostGameReport(null);
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
@@ -825,7 +813,6 @@ function App() {
     setGame(newGame);
     setImportInput("");
     setActiveTabTracked("strategize");
-    setDeepAnalysisAnnotations(null);
     setPostGameReport(null);
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
@@ -876,12 +863,20 @@ function App() {
     }
   };
 
-  const playBestLine = (fen: string, sanMoves: string[], targetIndex: number) => {
+  const playBestLine = (
+    fen: string,
+    sanMoves: string[],
+    targetIndex: number,
+  ) => {
     const historyIndex = gameHistory.indexOf(fen);
-    const baseHistory = historyIndex >= 0
-      ? gameHistory.slice(0, historyIndex + 1)
-      : [...gameHistory, fen];
-    const baseSans = gameSanList.slice(0, historyIndex >= 0 ? historyIndex : gameSanList.length);
+    const baseHistory =
+      historyIndex >= 0
+        ? gameHistory.slice(0, historyIndex + 1)
+        : [...gameHistory, fen];
+    const baseSans = gameSanList.slice(
+      0,
+      historyIndex >= 0 ? historyIndex : gameSanList.length,
+    );
 
     // Play ALL moves in the best line so Forward/Back can step through them
     const fullGame = new Chess(fen);
@@ -931,12 +926,19 @@ function App() {
       const startSquare = move.slice(0, 2);
       const endSquare = move.slice(2, 4);
       // Skip if an arrow for this square pair already exists (higher-ranked line wins)
-      if (arrows.some((a) => a.startSquare === startSquare && a.endSquare === endSquare))
+      if (
+        arrows.some(
+          (a) => a.startSquare === startSquare && a.endSquare === endSquare,
+        )
+      )
         return arrows;
-      const bestLine = Object.values(engineThoughts).find((t) => t.multipv === 1);
+      const bestLine = Object.values(engineThoughts).find(
+        (t) => t.multipv === 1,
+      );
       const bestScore = bestLine ? parseScore(bestLine.score) : 0;
       const lineScore = parseScore(thought.score);
-      const isBlunder = thought.multipv !== 1 && bestScore > 1.0 && lineScore < 0;
+      const isBlunder =
+        thought.multipv !== 1 && bestScore > 1.0 && lineScore < 0;
       let color = "rgba(128, 128, 128, 0.4)";
       if (isBlunder) color = "rgba(255, 80, 80, 0.7)";
       else if (thought.multipv === 1) color = "rgba(50, 205, 50, 0.8)";
@@ -944,7 +946,8 @@ function App() {
       else if (thought.multipv === 3) color = "rgba(255, 165, 0, 0.6)";
       arrows.push({ startSquare, endSquare, color });
       return arrows;
-    }, []).reverse();
+    }, [])
+    .reverse();
 
   const displayThoughts = Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
@@ -1028,93 +1031,6 @@ function App() {
     }
   };
 
-  const renderAnnotatedMoves = () => {
-    const sanMoves = gameSanMoves;
-    if (sanMoves.length === 0) {
-      return <div style={{ fontStyle: "italic", color: "#888", textAlign: "center", marginTop: "20px" }}>No moves to annotate.</div>;
-    }
-
-    const annotationMap = new Map<string, string>();
-    if (deepAnalysisAnnotations) {
-      for (const a of deepAnalysisAnnotations) {
-        annotationMap.set(`${a.moveNumber}-${a.side}`, a.comment);
-      }
-    }
-
-    const elements: React.ReactNode[] = [];
-    let needsContinuation = false;
-
-    for (let i = 0; i < sanMoves.length; i++) {
-      const moveNumber = Math.floor(i / 2) + 1;
-      const isWhite = i % 2 === 0;
-      const side = isWhite ? "white" : "black";
-      const historyIndex = i + 1; // gameHistory[0] is start position
-
-      // Prepend move number before white's move, or continuation after annotation
-      if (isWhite) {
-        elements.push(
-          <span key={`num-${i}`} style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}>
-            {moveNumber}.
-          </span>
-        );
-      } else if (needsContinuation) {
-        elements.push(
-          <span key={`cont-${i}`} style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}>
-            {moveNumber}...
-          </span>
-        );
-        needsContinuation = false;
-      }
-
-      // Render clickable move
-      elements.push(
-        <span
-          key={`move-${i}`}
-          className="move-chip"
-          onClick={() => navigateToMove(historyIndex)}
-          style={{
-            cursor: "pointer",
-            backgroundColor: currentMoveIndex === historyIndex ? "#3a5a8a" : "transparent",
-            color: currentMoveIndex === historyIndex ? "#fff" : "#ddd",
-            padding: "2px 4px",
-            borderRadius: "3px",
-            border: "none",
-            marginRight: "4px",
-            fontFamily: "monospace",
-            fontSize: "0.9rem",
-            display: "inline",
-            boxShadow: "none",
-          }}
-        >
-          {sanMoves[i]}
-        </span>
-      );
-
-      // Check for annotation after this move
-      const annotationKey = `${moveNumber}-${side}`;
-      const comment = annotationMap.get(annotationKey);
-      if (comment) {
-        elements.push(
-          <span key={`ann-${i}`} className="deep-analysis-comment">
-            {comment}
-          </span>
-        );
-        // If white's move was annotated, black's next move needs continuation number
-        if (isWhite) {
-          needsContinuation = true;
-        }
-      }
-    }
-
-    return (
-      <div style={{ lineHeight: "1.8", padding: "4px 0" }}>
-        {elements}
-      </div>
-    );
-  };
-
-  const hasPremiumKey = apiKeyStatus?.gemini_set || apiKeyStatus?.openai_set;
-
   const gameSanMoves = gameSanList;
 
   const mainLineSanMoves = useMemo(() => {
@@ -1122,12 +1038,79 @@ function App() {
     return reconstructSansFromHistory(mainLineHistory);
   }, [mainLineHistory]);
 
-  const isExploringVariation = activeTab === "report" && mainLineHistory !== null &&
+  const moveHighlightSquares = useMemo(() => {
+    if (currentMoveIndex === 0) return {};
+
+    const prevFen = gameHistory[currentMoveIndex - 1];
+    const san = gameSanList[currentMoveIndex - 1];
+    if (!prevFen || !san) return {};
+
+    try {
+      const g = new Chess(prevFen);
+      const move = g.move(san);
+      if (!move) return {};
+
+      let color = "rgba(255, 255, 100, 0.4)"; // default yellow
+      if (postGameReport && activeTab === "report") {
+        const moveNum = Math.floor((currentMoveIndex - 1) / 2) + 1;
+        const side: "white" | "black" =
+          (currentMoveIndex - 1) % 2 === 0 ? "white" : "black";
+        const moment = postGameReport.criticalMoments.find(
+          (m) => m.moveNumber === moveNum && m.side === side,
+        );
+        if (moment) {
+          switch (moment.category) {
+            case "blunder":
+              color = "rgba(255, 80, 80, 0.45)";
+              break;
+            case "mistake":
+              color = "rgba(255, 165, 0, 0.4)";
+              break;
+            case "inaccuracy":
+              color = "rgba(255, 220, 80, 0.35)";
+              break;
+            case "turning_point":
+              color = "rgba(80, 180, 255, 0.4)";
+              break;
+            case "great_move":
+              color = "rgba(74, 222, 128, 0.45)";
+              break;
+            case "critical":
+            case "brilliant":
+              color = "rgba(34, 211, 238, 0.45)";
+              break;
+            case "opportunity":
+              color = "rgba(167, 139, 250, 0.4)";
+              break;
+            case "golden_opportunity":
+              color = "rgba(244, 114, 182, 0.4)";
+              break;
+          }
+        }
+      }
+
+      return {
+        [move.from]: { backgroundColor: color },
+        [move.to]: { backgroundColor: color },
+      };
+    } catch {
+      return {};
+    }
+  }, [currentMoveIndex, gameHistory, gameSanList, postGameReport, activeTab]);
+
+  const isExploringVariation =
+    activeTab === "report" &&
+    mainLineHistory !== null &&
     (gameHistory.length !== mainLineHistory.length ||
-     gameHistory.some((fen, i) => mainLineHistory[i] !== fen));
+      gameHistory.some((fen, i) => mainLineHistory[i] !== fen));
 
   const navigateToMainLineMove = (historyIndex: number) => {
-    if (!mainLineHistory || historyIndex < 0 || historyIndex >= mainLineHistory.length) return;
+    if (
+      !mainLineHistory ||
+      historyIndex < 0 ||
+      historyIndex >= mainLineHistory.length
+    )
+      return;
     setGameHistory(mainLineHistory);
     setGameSanList(mainLineSanMoves || []);
     setCurrentMoveIndex(historyIndex);
@@ -1198,7 +1181,10 @@ function App() {
 
     if (sanMoves.length === 0) return null;
 
-    const momentMap = new Map<string, (typeof postGameReport.criticalMoments)[number]>();
+    const momentMap = new Map<
+      string,
+      (typeof postGameReport.criticalMoments)[number]
+    >();
     for (const m of postGameReport.criticalMoments) {
       momentMap.set(`${m.moveNumber}-${m.side}`, m);
     }
@@ -1215,7 +1201,7 @@ function App() {
         elements.push(
           <div key={key} className="report-move-row">
             {currentRow}
-          </div>
+          </div>,
         );
         currentRow = [];
         movesInRow = 0;
@@ -1229,6 +1215,11 @@ function App() {
       const historyIndex = i + 1;
       const moment = momentMap.get(`${moveNumber}-${side}`);
       const isPlayerMoment = moment && moment.side === reportPerspective;
+      const isOpportunity =
+        moment &&
+        moment.side !== reportPerspective &&
+        (moment.category === "opportunity" ||
+          moment.category === "golden_opportunity");
       const isOnMainLine = !isExploringVariation;
       const isCurrentMove = isOnMainLine && currentMoveIndex === historyIndex;
 
@@ -1239,16 +1230,22 @@ function App() {
 
       if (isWhite) {
         currentRow.push(
-          <span key={`num-${i}`} style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}>
+          <span
+            key={`num-${i}`}
+            style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}
+          >
             {moveNumber}.
-          </span>
+          </span>,
         );
       } else if (needsContinuation) {
         // After a critical moment card broke the row, show continuation number
         currentRow.push(
-          <span key={`cont-${i}`} style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}>
+          <span
+            key={`cont-${i}`}
+            style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}
+          >
             {moveNumber}...
-          </span>
+          </span>,
         );
         needsContinuation = false;
       }
@@ -1260,7 +1257,7 @@ function App() {
       if (isCurrentMove) {
         chipBg = "#3a5a8a";
         chipColor = "#fff";
-      } else if (isPlayerMoment) {
+      } else if (isPlayerMoment || isOpportunity) {
         switch (moment.category) {
           case "blunder":
             chipBg = "rgba(255, 80, 80, 0.15)";
@@ -1293,6 +1290,16 @@ function App() {
             chipColor = "#22d3ee";
             chipBorder = "1px solid rgba(34, 211, 238, 0.3)";
             break;
+          case "opportunity":
+            chipBg = "rgba(167, 139, 250, 0.15)";
+            chipColor = "#a78bfa";
+            chipBorder = "1px solid rgba(167, 139, 250, 0.3)";
+            break;
+          case "golden_opportunity":
+            chipBg = "rgba(244, 114, 182, 0.15)";
+            chipColor = "#f472b6";
+            chipBorder = "1px solid rgba(244, 114, 182, 0.3)";
+            break;
         }
       }
 
@@ -1317,7 +1324,7 @@ function App() {
           }}
         >
           {sanMoves[i]}
-        </span>
+        </span>,
       );
 
       // Count a full move after black's move
@@ -1325,8 +1332,8 @@ function App() {
         movesInRow++;
       }
 
-      // Player's critical moments: flush current row, render card, start new row
-      if (isPlayerMoment && moment) {
+      // Player's critical moments + opportunities: flush current row, render card, start new row
+      if ((isPlayerMoment || isOpportunity) && moment) {
         flushRow(`row-before-card-${i}`);
         elements.push(
           <div
@@ -1337,41 +1344,97 @@ function App() {
           >
             <div className="cm-header">
               <span className={`category-badge badge-${moment.category}`}>
-                {moment.category === "turning_point" ? "Turning Point" : moment.category === "great_move" ? "Great Move" : (moment.category === "critical" || moment.category === "brilliant") ? "Critical" : moment.category.charAt(0).toUpperCase() + moment.category.slice(1)}
+                {moment.category === "turning_point"
+                  ? "Turning Point"
+                  : moment.category === "great_move"
+                    ? "Great Move"
+                    : moment.category === "critical" ||
+                        moment.category === "brilliant"
+                      ? "Critical"
+                      : moment.category === "golden_opportunity"
+                        ? "Golden Opportunity"
+                        : moment.category === "opportunity"
+                          ? "Opportunity"
+                          : moment.category.charAt(0).toUpperCase() +
+                            moment.category.slice(1)}
               </span>
               <span className="cm-move-info">
                 Move {moment.moveNumber}: <strong>{moment.moveSan}</strong>
               </span>
-              <span className="cm-eval-drop" style={moment.category === "great_move" ? { color: "#4ade80" } : (moment.category === "critical" || moment.category === "brilliant") ? { color: "#22d3ee" } : undefined}>
-                {moment.category === "great_move" || moment.category === "critical" || moment.category === "brilliant" ? `+${Math.abs(moment.evalDrop).toFixed(1)}` : moment.evalDrop > 0 ? `−${moment.evalDrop.toFixed(1)}` : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
+              <span
+                className="cm-eval-drop"
+                style={
+                  moment.category === "great_move"
+                    ? { color: "#4ade80" }
+                    : moment.category === "critical" ||
+                        moment.category === "brilliant"
+                      ? { color: "#22d3ee" }
+                      : moment.category === "opportunity" ||
+                          moment.category === "golden_opportunity"
+                        ? { color: "#4ade80" }
+                        : undefined
+                }
+              >
+                {moment.category === "great_move" ||
+                moment.category === "critical" ||
+                moment.category === "brilliant"
+                  ? `+${Math.abs(moment.evalDrop).toFixed(1)}`
+                  : moment.category === "opportunity" ||
+                      moment.category === "golden_opportunity"
+                    ? `+${Math.abs(moment.evalDrop).toFixed(1)}`
+                    : moment.evalDrop > 0
+                      ? `−${moment.evalDrop.toFixed(1)}`
+                      : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
               </span>
             </div>
-            {moment.category !== "great_move" && moment.category !== "critical" && moment.category !== "brilliant" && moment.bestLine.length > 0 && (() => {
-              const fenIdx = gameHistory.indexOf(moment.fen);
-              const activeBestLineIdx = fenIdx >= 0 && isExploringVariation
-                ? currentMoveIndex - fenIdx - 1
-                : -1;
-              return (
-              <div className="cm-best-line" onClick={(e) => e.stopPropagation()}>
-                <span>Best:</span>
-                {moment.bestLine.map((san, idx) => {
-                  return (
-                    <span key={idx} style={{ display: "contents" }}>
-                      {idx > 0 && <span className="best-line-arrow">→</span>}
-                      <span
-                        className={`best-line-move${idx === activeBestLineIdx ? " best-line-active" : ""}`}
-                        onClick={() => playBestLine(moment.fen, moment.bestLine, idx)}
-                      >
-                        {san}
-                      </span>
+            {moment.category !== "great_move" &&
+              moment.category !== "critical" &&
+              moment.category !== "brilliant" &&
+              moment.bestLine.length > 0 &&
+              (moment.category === "opportunity" ||
+                moment.category === "golden_opportunity" ||
+                moment.side === reportPerspective) &&
+              (() => {
+                const fenIdx = gameHistory.indexOf(moment.fen);
+                const activeBestLineIdx =
+                  fenIdx >= 0 && isExploringVariation
+                    ? currentMoveIndex - fenIdx - 1
+                    : -1;
+                return (
+                  <div
+                    className="cm-best-line"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <span>
+                      {moment.category === "opportunity" ||
+                      moment.category === "golden_opportunity"
+                        ? "Best response:"
+                        : "Best:"}
                     </span>
-                  );
-                })}
-              </div>
-              );
-            })()}
-            <div className="cm-explanation"><ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown></div>
-          </div>
+                    {moment.bestLine.map((san, idx) => {
+                      return (
+                        <span key={idx} style={{ display: "contents" }}>
+                          {idx > 0 && (
+                            <span className="best-line-arrow">→</span>
+                          )}
+                          <span
+                            className={`best-line-move${idx === activeBestLineIdx ? " best-line-active" : ""}`}
+                            onClick={() =>
+                              playBestLine(moment.fen, moment.bestLine, idx)
+                            }
+                          >
+                            {san}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            <div className="cm-explanation">
+              <ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown>
+            </div>
+          </div>,
         );
         needsContinuation = isWhite;
       }
@@ -1390,9 +1453,11 @@ function App() {
   // Show setup wizard on first launch
   if (configLoaded && appConfig && !appConfig.setupComplete) {
     return (
-      <SetupWizard onComplete={() => {
-        invoke<AppConfig>("get_app_config").then(setAppConfig);
-      }} />
+      <SetupWizard
+        onComplete={() => {
+          invoke<AppConfig>("get_app_config").then(setAppConfig);
+        }}
+      />
     );
   }
 
@@ -1447,6 +1512,7 @@ function App() {
                 arrows: currentMoveIndex === 0 ? [] : bestMoveArrows,
                 boardOrientation: boardOrientation,
                 animationDurationInMs: 120,
+                squareStyles: moveHighlightSquares,
               }}
             />
           </div>
@@ -1556,158 +1622,23 @@ function App() {
             gap: "20px",
           }}
         >
-          {/* Best Lines Panel — hidden when viewing a full report */}
-          {!(activeTab === "report" && (postGameReport || isPostGameLoading)) && (
-          <div
-            style={{
-              height: "300px",
-              border: "1px solid #444",
-              borderRadius: "12px",
-              padding: "20px",
-              overflowY: "auto",
-              display: "flex",
-              flexDirection: "column",
-              backgroundColor: "#1a1a1a",
-              color: "#eee",
-              textAlign: "left",
-              boxShadow: "inset 0 2px 8px rgba(0,0,0,0.2)",
-            }}
-          >
-            <h3
-              style={{
-                marginTop: 0,
-                borderBottom: "1px solid #444",
-                paddingBottom: "15px",
-                marginBottom: "15px",
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <span>
-                Best Lines for {game.turn() === "w" ? "White" : "Black"}
-              </span>
-              <span
-                style={{
-                  fontSize: "0.8rem",
-                  fontWeight: "normal",
-                  color: "#888",
-                  backgroundColor: "#333",
-                  padding: "4px 8px",
-                  borderRadius: "4px",
-                }}
-              >
-                Stockfish 16
-              </span>
-            </h3>
-
-            <div
-              style={{ display: "flex", flexDirection: "column", gap: "10px" }}
-            >
-              {displayThoughts.length === 0 && (
-                <div
-                  style={{
-                    fontStyle: "italic",
-                    color: "#888",
-                    textAlign: "center",
-                    marginTop: "20px",
-                  }}
-                >
-                  Analyzing current position...
-                </div>
-              )}
-
-              {displayThoughts.map((thought) => {
-                const lineScore = parseScore(thought.score);
-                const bestLine = displayThoughts.find(
-                  (t) => t.multipv === 1
-                );
-                const bestScore = bestLine
-                  ? parseScore(bestLine.score)
-                  : 0;
-                const isBlunder =
-                  thought.multipv !== 1 &&
-                  bestScore > 1.0 &&
-                  lineScore < 0;
-                const style = getLineStyle(
-                  isBlunder ? "red" : thought.multipv
-                );
-                return (
-                  <div
-                    key={thought.multipv}
-                    style={{
-                      backgroundColor: style.bg,
-                      border: `1px solid ${style.border}`,
-                      borderRadius: "6px",
-                      padding: "10px",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "6px",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        fontSize: "0.8rem",
-                        color: style.text,
-                      }}
-                    >
-                      <span>
-                        <strong>Line #{thought.multipv}</strong>
-                      </span>
-                      <span style={{ fontWeight: "bold" }}>
-                        Eval:{" "}
-                        {thought.score.startsWith("-") ||
-                        thought.score.startsWith("M")
-                          ? thought.score
-                          : `+${thought.score}`}
-                      </span>
-                    </div>
-                    <div
-                      style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}
-                    >
-                      {thought.moves.map((san, i) => {
-                        if (!san) return null;
-                        return (
-                          <button
-                            key={i}
-                            className="move-chip"
-                            onClick={() => playLineToMove(thought.rawMoves, i)}
-                            style={{
-                              backgroundColor: style.chipBg,
-                              color: style.text,
-                            }}
-                          >
-                            {san}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          )}
-
           {/* Tab-based Coach Panel */}
-          <div className={`tab-panel${activeTab === "report" && (postGameReport || isPostGameLoading) ? " tab-panel-full" : ""}`}>
+          <div className="tab-panel">
             {/* Tab Bar */}
             <div className="tab-bar">
-              <button
-                className={`tab-button${activeTab === "strategize" ? " tab-active" : ""}`}
-                onClick={() => setActiveTabTracked("strategize")}
-              >
-                Strategize
-              </button>
               <button
                 className={`tab-button${activeTab === "analysis" ? " tab-active" : ""}`}
                 onClick={() => setActiveTabTracked("analysis")}
               >
                 Analysis
               </button>
+              <button
+                className={`tab-button${activeTab === "strategize" ? " tab-active" : ""}`}
+                onClick={() => setActiveTabTracked("strategize")}
+              >
+                Strategize
+              </button>
+
               <button
                 className={`tab-button${activeTab === "report" ? " tab-active" : ""}`}
                 onClick={() => setActiveTabTracked("report")}
@@ -1737,7 +1668,14 @@ function App() {
             {/* Tab Content */}
             <div className="tab-content">
               {activeTab === "strategize" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px", height: "100%" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    height: "100%",
+                  }}
+                >
                   <button
                     className="action-button"
                     onClick={askCoach}
@@ -1748,7 +1686,8 @@ function App() {
                       fontSize: "0.9rem",
                     }}
                   >
-                    <CoachIcon /> {isCoachLoading ? "Thinking..." : "Strategize"}
+                    <CoachIcon />{" "}
+                    {isCoachLoading ? "Thinking..." : "Strategize"}
                   </button>
                   <div
                     style={{
@@ -1760,65 +1699,186 @@ function App() {
                       flex: 1,
                     }}
                   >
-                    {coachMessage
-                      ? <ReactMarkdown>{stripLatex(coachMessage)}</ReactMarkdown>
-                      : (isCoachLoading
-                        ? "Coach is looking at the board..."
-                        : "Click 'Strategize' to get quick insights about the current position from the AI coach.")}
-                  </div>
-                </div>
-              )}
-
-              {activeTab === "analysis" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px", height: "100%" }}>
-                  <button
-                    className="action-button"
-                    onClick={requestDeepAnalysis}
-                    disabled={gameHistory.length <= 1 || isDeepAnalysisLoading}
-                    style={{
-                      flex: "none",
-                      padding: "10px",
-                      fontSize: "0.9rem",
-                    }}
-                  >
-                    <DeepAnalysisIcon /> {isDeepAnalysisLoading ? "Analyzing..." : "Run Deep Analysis"}
-                    {hasPremiumKey && <span className="premium-star"><StarIcon /></span>}
-                  </button>
-                  <div
-                    style={{
-                      fontSize: "0.9rem",
-                      lineHeight: "1.4",
-                      color: "#ccc",
-                      overflowY: "auto",
-                      flex: 1,
-                    }}
-                  >
-                    {isDeepAnalysisLoading ? (
-                      <div style={{ fontStyle: "italic", color: "#888", textAlign: "center", marginTop: "20px" }}>
-                        Analyzing game with AI coach...
-                      </div>
-                    ) : deepAnalysisAnnotations ? (
-                      renderAnnotatedMoves()
+                    {coachMessage ? (
+                      <ReactMarkdown>{stripLatex(coachMessage)}</ReactMarkdown>
+                    ) : isCoachLoading ? (
+                      "Coach is looking at the board..."
                     ) : (
-                      <div style={{ fontStyle: "italic", color: "#888", textAlign: "center", marginTop: "20px" }}>
-                        Click 'Run Deep Analysis' to get move-by-move annotations of the game so far.
-                      </div>
+                      "Click 'Strategize' to get quick insights about the current position from the AI coach."
                     )}
                   </div>
                 </div>
               )}
 
+              {activeTab === "analysis" && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    height: "100%",
+                  }}
+                >
+                  <h3
+                    style={{
+                      marginTop: 0,
+                      marginBottom: 0,
+                      borderBottom: "1px solid #444",
+                      paddingBottom: "12px",
+                      color: "#fff",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <span>
+                      Best Lines for {game.turn() === "w" ? "White" : "Black"}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.8rem",
+                        fontWeight: "normal",
+                        color: "#888",
+                        backgroundColor: "#333",
+                        padding: "4px 8px",
+                        borderRadius: "4px",
+                      }}
+                    >
+                      Stockfish 16
+                    </span>
+                  </h3>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px",
+                      flex: 1,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {displayThoughts.length === 0 && (
+                      <div
+                        style={{
+                          fontStyle: "italic",
+                          color: "#888",
+                          textAlign: "center",
+                          marginTop: "20px",
+                        }}
+                      >
+                        Analyzing current position...
+                      </div>
+                    )}
+
+                    {displayThoughts.map((thought) => {
+                      const lineScore = parseScore(thought.score);
+                      const bestLine = displayThoughts.find(
+                        (t) => t.multipv === 1,
+                      );
+                      const bestScore = bestLine
+                        ? parseScore(bestLine.score)
+                        : 0;
+                      const isBlunder =
+                        thought.multipv !== 1 &&
+                        bestScore > 1.0 &&
+                        lineScore < 0;
+                      const style = getLineStyle(
+                        isBlunder ? "red" : thought.multipv,
+                      );
+                      return (
+                        <div
+                          key={thought.multipv}
+                          style={{
+                            backgroundColor: style.bg,
+                            border: `1px solid ${style.border}`,
+                            borderRadius: "6px",
+                            padding: "10px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "6px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              fontSize: "0.8rem",
+                              color: style.text,
+                            }}
+                          >
+                            <span>
+                              <strong>Line #{thought.multipv}</strong>
+                            </span>
+                            <span style={{ fontWeight: "bold" }}>
+                              Eval:{" "}
+                              {thought.score.startsWith("-") ||
+                              thought.score.startsWith("M")
+                                ? thought.score
+                                : `+${thought.score}`}
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "6px",
+                            }}
+                          >
+                            {thought.moves.map((san, i) => {
+                              if (!san) return null;
+                              return (
+                                <button
+                                  key={i}
+                                  className="move-chip"
+                                  onClick={() =>
+                                    playLineToMove(thought.rawMoves, i)
+                                  }
+                                  style={{
+                                    backgroundColor: style.chipBg,
+                                    color: style.text,
+                                  }}
+                                >
+                                  {san}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {activeTab === "report" && (
-                <div style={{ fontSize: "0.9rem", lineHeight: "1.4", color: "#ccc", overflowY: "auto", height: "100%" }}>
+                <div
+                  style={{
+                    fontSize: "0.9rem",
+                    lineHeight: "1.4",
+                    color: "#ccc",
+                    overflowY: "auto",
+                    height: "100%",
+                  }}
+                >
                   {isPostGameLoading && analysisProgress ? (
                     <div className="analysis-progress">
                       {analysisProgress.phase === "engine" && (
                         <>
-                          <div className="progress-label">Evaluating positions with Stockfish...</div>
-                          <div className="progress-bar-track">
-                            <div className="progress-bar-fill" style={{ width: `${(analysisProgress.current / analysisProgress.total) * 100}%` }} />
+                          <div className="progress-label">
+                            Evaluating positions with Stockfish...
                           </div>
-                          <div className="progress-count">{analysisProgress.current} / {analysisProgress.total} positions</div>
+                          <div className="progress-bar-track">
+                            <div
+                              className="progress-bar-fill"
+                              style={{
+                                width: `${(analysisProgress.current / analysisProgress.total) * 100}%`,
+                              }}
+                            />
+                          </div>
+                          <div className="progress-count">
+                            {analysisProgress.current} /{" "}
+                            {analysisProgress.total} positions
+                          </div>
                         </>
                       )}
                       {analysisProgress.phase === "lc0" && (
@@ -1826,50 +1886,118 @@ function App() {
                           <div className="progress-label">
                             Lc0 strategic analysis...
                             {analysisProgress.backend && (
-                              <span className="lc0-backend-badge" data-gpu={!["eigen", "trivial", "random", "unknown"].includes(analysisProgress.backend)}>
+                              <span
+                                className="lc0-backend-badge"
+                                data-gpu={
+                                  ![
+                                    "eigen",
+                                    "trivial",
+                                    "random",
+                                    "unknown",
+                                  ].includes(analysisProgress.backend)
+                                }
+                              >
                                 {analysisProgress.backend}
                               </span>
                             )}
                           </div>
-                          {analysisProgress.backend && ["eigen", "trivial", "random"].includes(analysisProgress.backend) && (
-                            <div className="lc0-cpu-warning">CPU fallback — install Lc0 with OpenCL for GPU acceleration</div>
-                          )}
+                          {analysisProgress.backend &&
+                            ["eigen", "trivial", "random"].includes(
+                              analysisProgress.backend,
+                            ) && (
+                              <div className="lc0-cpu-warning">
+                                CPU fallback — install Lc0 with OpenCL for GPU
+                                acceleration
+                              </div>
+                            )}
                           <div className="progress-bar-track">
-                            <div className="progress-bar-fill lc0-fill" style={{ width: `${analysisProgress.total > 0 ? (analysisProgress.current / analysisProgress.total) * 100 : 0}%` }} />
+                            <div
+                              className="progress-bar-fill lc0-fill"
+                              style={{
+                                width: `${analysisProgress.total > 0 ? (analysisProgress.current / analysisProgress.total) * 100 : 0}%`,
+                              }}
+                            />
                           </div>
-                          <div className="progress-count">{analysisProgress.current} / {analysisProgress.total} positions</div>
+                          <div className="progress-count">
+                            {analysisProgress.current} /{" "}
+                            {analysisProgress.total} positions
+                          </div>
                         </>
                       )}
                       {analysisProgress.phase === "llm" && (
                         <>
-                          <div className="progress-label">AI analyzing critical moments...</div>
-                          <div className="progress-bar-track">
-                            <div className="progress-bar-fill" style={{ width: `${(analysisProgress.current / analysisProgress.total) * 100}%` }} />
+                          <div className="progress-label">
+                            AI analyzing critical moments...
                           </div>
-                          <div className="progress-count">{analysisProgress.current} / {analysisProgress.total} moments</div>
+                          <div className="progress-bar-track">
+                            <div
+                              className="progress-bar-fill"
+                              style={{
+                                width: `${(analysisProgress.current / analysisProgress.total) * 100}%`,
+                              }}
+                            />
+                          </div>
+                          <div className="progress-count">
+                            {analysisProgress.current} /{" "}
+                            {analysisProgress.total} moments
+                          </div>
                         </>
                       )}
                       {analysisProgress.phase === "summary" && (
-                        <div className="progress-label">Generating thematic summary...</div>
+                        <div className="progress-label">
+                          Generating thematic summary...
+                        </div>
                       )}
                     </div>
                   ) : postGameReport ? (
                     <div className="report-content">
-                      <div className="report-summary"><ReactMarkdown>{stripLatex(postGameReport.thematicSummary)}</ReactMarkdown></div>
+                      <div className="report-summary">
+                        <ReactMarkdown>
+                          {stripLatex(postGameReport.thematicSummary)}
+                        </ReactMarkdown>
+                      </div>
                       {renderReportMoves()}
-                      {postGameReport.criticalMoments.filter(m => m.side === reportPerspective).length === 0 && (
-                        <div style={{ fontStyle: "italic", color: "#888", textAlign: "center", marginTop: "12px" }}>
-                          No critical moments detected for your play — solid game!
+                      {postGameReport.criticalMoments.filter(
+                        (m) =>
+                          m.side === reportPerspective ||
+                          m.category === "opportunity" ||
+                          m.category === "golden_opportunity",
+                      ).length === 0 && (
+                        <div
+                          style={{
+                            fontStyle: "italic",
+                            color: "#888",
+                            textAlign: "center",
+                            marginTop: "12px",
+                          }}
+                        >
+                          No critical moments detected for your play — solid
+                          game!
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "12px", alignItems: "center", paddingTop: "20px" }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
+                        alignItems: "center",
+                        paddingTop: "20px",
+                      }}
+                    >
                       <button
                         className="action-button"
-                        onClick={() => { setReportPerspective(boardOrientation); setShowReportSetup(true); }}
+                        onClick={() => {
+                          setReportPerspective(boardOrientation);
+                          setShowReportSetup(true);
+                        }}
                         disabled={gameHistory.length <= 1 || isPostGameLoading}
-                        style={{ width: "100%", justifyContent: "center", padding: "12px" }}
+                        style={{
+                          width: "100%",
+                          justifyContent: "center",
+                          padding: "12px",
+                        }}
                       >
                         <ReportIcon /> Generate Report
                       </button>
@@ -1879,7 +2007,11 @@ function App() {
                           <button
                             className="action-button"
                             onClick={() => loadSavedReport(savedReportMeta.id)}
-                            style={{ flex: "none", padding: "6px 14px", fontSize: "0.8rem" }}
+                            style={{
+                              flex: "none",
+                              padding: "6px 14px",
+                              fontSize: "0.8rem",
+                            }}
                           >
                             Load
                           </button>
@@ -1888,7 +2020,12 @@ function App() {
                       <button
                         className="action-button"
                         onClick={openSavedReportsModal}
-                        style={{ width: "100%", justifyContent: "center", padding: "10px", fontSize: "0.85rem" }}
+                        style={{
+                          width: "100%",
+                          justifyContent: "center",
+                          padding: "10px",
+                          fontSize: "0.85rem",
+                        }}
                       >
                         Browse Saved Reports
                       </button>
@@ -1903,10 +2040,30 @@ function App() {
 
       {/* Report Setup Modal */}
       {showReportSetup && (
-        <div className="report-setup-overlay" onClick={() => setShowReportSetup(false)}>
-          <div className="report-setup-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 16px 0", fontSize: "1.05rem", color: "#fff" }}>Full Game Report</h3>
-            <p style={{ margin: "0 0 12px 0", fontSize: "0.85rem", color: "#aaa" }}>
+        <div
+          className="report-setup-overlay"
+          onClick={() => setShowReportSetup(false)}
+        >
+          <div
+            className="report-setup-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3
+              style={{
+                margin: "0 0 16px 0",
+                fontSize: "1.05rem",
+                color: "#fff",
+              }}
+            >
+              Full Game Report
+            </h3>
+            <p
+              style={{
+                margin: "0 0 12px 0",
+                fontSize: "0.85rem",
+                color: "#aaa",
+              }}
+            >
               Who is this report for?
             </p>
             <div className="perspective-selector">
@@ -1923,10 +2080,15 @@ function App() {
                 <span style={{ fontSize: "1.2rem" }}>&#9818;</span> Black
               </button>
             </div>
-            <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+            <div
+              className="model-toggle-row"
+              style={{ marginTop: "16px", marginBottom: "0" }}
+            >
               <div className="model-toggle-label">
                 <span className="model-toggle-title">Show what I did well</span>
-                <span className="model-toggle-desc">Highlight great moves that shifted the game in your favor</span>
+                <span className="model-toggle-desc">
+                  Highlight great moves that shifted the game in your favor
+                </span>
               </div>
               <button
                 className={`toggle-switch ${includeGreatMoves ? "toggle-on" : ""}`}
@@ -1937,11 +2099,36 @@ function App() {
                 <span className="toggle-knob" />
               </button>
             </div>
+            <div
+              className="model-toggle-row"
+              style={{ marginTop: "16px", marginBottom: "0" }}
+            >
+              <div className="model-toggle-label">
+                <span className="model-toggle-title">Show opportunities</span>
+                <span className="model-toggle-desc">
+                  Highlight moments where your opponent gave you a chance to
+                  seize the advantage
+                </span>
+              </div>
+              <button
+                className={`toggle-switch ${includeOpportunities ? "toggle-on" : ""}`}
+                onClick={() => setIncludeOpportunities(!includeOpportunities)}
+                role="switch"
+                aria-checked={includeOpportunities}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </div>
             {appConfig?.engineMode === "hybrid" && (
-              <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+              <div
+                className="model-toggle-row"
+                style={{ marginTop: "16px", marginBottom: "0" }}
+              >
                 <div className="model-toggle-label">
                   <span className="model-toggle-title">Use Lc0 analysis</span>
-                  <span className="model-toggle-desc">Add Leela Chess Zero strategic insight and WDL probabilities</span>
+                  <span className="model-toggle-desc">
+                    Add Leela Chess Zero strategic insight and WDL probabilities
+                  </span>
                 </div>
                 <button
                   className={`toggle-switch ${useLc0 ? "toggle-on" : ""}`}
@@ -1953,10 +2140,16 @@ function App() {
                 </button>
               </div>
             )}
-            <div className="model-toggle-row" style={{ marginTop: "16px", marginBottom: "0" }}>
+            <div
+              className="model-toggle-row"
+              style={{ marginTop: "16px", marginBottom: "0" }}
+            >
               <div className="model-toggle-label">
                 <span className="model-toggle-title">Detailed report</span>
-                <span className="model-toggle-desc">Lower thresholds to flag more moments for broader game coverage</span>
+                <span className="model-toggle-desc">
+                  Lower thresholds to flag more moments for broader game
+                  coverage
+                </span>
               </div>
               <button
                 className={`toggle-switch ${detailedReport ? "toggle-on" : ""}`}
@@ -1967,7 +2160,13 @@ function App() {
                 <span className="toggle-knob" />
               </button>
             </div>
-            <p style={{ margin: "16px 0 8px 0", fontSize: "0.85rem", color: "#aaa" }}>
+            <p
+              style={{
+                margin: "16px 0 8px 0",
+                fontSize: "0.85rem",
+                color: "#aaa",
+              }}
+            >
               Analysis depth
             </p>
             <div className="perspective-selector">
@@ -2000,9 +2199,15 @@ function App() {
                   includeGreatMoves: includeGreatMoves,
                   detailedReport: detailedReport,
                   useLc0: useLc0,
+                  includeOpportunities: includeOpportunities,
                 }).catch(() => {});
               }}
-              style={{ width: "100%", marginTop: "16px", padding: "10px", justifyContent: "center" }}
+              style={{
+                width: "100%",
+                marginTop: "16px",
+                padding: "10px",
+                justifyContent: "center",
+              }}
             >
               <ReportIcon /> Analyze Game
             </button>
@@ -2012,52 +2217,114 @@ function App() {
 
       {/* Saved Reports Modal */}
       {showSavedReportsModal && (
-        <div className="saved-reports-overlay" onClick={() => setShowSavedReportsModal(false)}>
-          <div className="saved-reports-modal" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="saved-reports-overlay"
+          onClick={() => setShowSavedReportsModal(false)}
+        >
+          <div
+            className="saved-reports-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
             <h2>
               <span>Saved Reports</span>
-              <button className="api-key-modal-close" onClick={() => setShowSavedReportsModal(false)}>
+              <button
+                className="api-key-modal-close"
+                onClick={() => setShowSavedReportsModal(false)}
+              >
                 ✕
               </button>
             </h2>
             {savedReportsList.length === 0 ? (
-              <div style={{ fontStyle: "italic", color: "#888", textAlign: "center", padding: "20px 0" }}>
+              <div
+                style={{
+                  fontStyle: "italic",
+                  color: "#888",
+                  textAlign: "center",
+                  padding: "20px 0",
+                }}
+              >
                 No saved reports yet.
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "400px", overflowY: "auto" }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                  maxHeight: "400px",
+                  overflowY: "auto",
+                }}
+              >
                 {savedReportsList.map((report) => (
                   <div key={report.id} className="saved-report-item">
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: "0.88rem", color: "#eee", marginBottom: "4px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div
+                        style={{
+                          fontSize: "0.88rem",
+                          color: "#eee",
+                          marginBottom: "4px",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
                         {report.openingMoves || "No moves"}
                       </div>
-                      <div style={{ display: "flex", gap: "8px", alignItems: "center", fontSize: "0.75rem", color: "#888" }}>
-                        <span className={`perspective-badge perspective-${report.perspective}`}>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "8px",
+                          alignItems: "center",
+                          fontSize: "0.75rem",
+                          color: "#888",
+                        }}
+                      >
+                        <span
+                          className={`perspective-badge perspective-${report.perspective}`}
+                        >
                           {report.perspective}
                         </span>
                         {report.result && report.result !== "unknown" && (
-                          <span className={`result-badge result-${report.result}`}>
-                            {report.result === "win" ? "W" : report.result === "loss" ? "L" : "D"}
+                          <span
+                            className={`result-badge result-${report.result}`}
+                          >
+                            {report.result === "win"
+                              ? "W"
+                              : report.result === "loss"
+                                ? "L"
+                                : "D"}
                           </span>
                         )}
-                        <span>{new Date(report.createdAt).toLocaleDateString()}</span>
+                        <span>
+                          {new Date(report.createdAt).toLocaleDateString()}
+                        </span>
                         <span>{report.moveCount} moves</span>
-                        <span>{report.criticalMomentCount} critical moments</span>
+                        <span>
+                          {report.criticalMomentCount} critical moments
+                        </span>
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
                       <button
                         className="action-button"
                         onClick={() => loadSavedReport(report.id)}
-                        style={{ flex: "none", padding: "6px 12px", fontSize: "0.78rem" }}
+                        style={{
+                          flex: "none",
+                          padding: "6px 12px",
+                          fontSize: "0.78rem",
+                        }}
                       >
                         Load
                       </button>
                       <button
                         className="action-button"
                         onClick={() => handleDeleteReport(report.id)}
-                        style={{ flex: "none", padding: "6px 12px", fontSize: "0.78rem", color: "#ff6b6b" }}
+                        style={{
+                          flex: "none",
+                          padding: "6px 12px",
+                          fontSize: "0.78rem",
+                          color: "#ff6b6b",
+                        }}
                       >
                         Delete
                       </button>
@@ -2072,11 +2339,17 @@ function App() {
 
       {/* API Key Modal */}
       {showApiKeyModal && (
-        <div className="api-key-modal-overlay" onClick={() => setShowApiKeyModal(false)}>
+        <div
+          className="api-key-modal-overlay"
+          onClick={() => setShowApiKeyModal(false)}
+        >
           <div className="api-key-modal" onClick={(e) => e.stopPropagation()}>
             <h2>
               <span>API Key Settings</span>
-              <button className="api-key-modal-close" onClick={() => setShowApiKeyModal(false)}>
+              <button
+                className="api-key-modal-close"
+                onClick={() => setShowApiKeyModal(false)}
+              >
                 ✕
               </button>
             </h2>
@@ -2087,7 +2360,9 @@ function App() {
               {apiKeyStatus?.gemini_set ? (
                 <div className="api-key-saved">
                   <span className="key-hint">{apiKeyStatus.gemini_hint}</span>
-                  <button onClick={() => handleRemoveKey("gemini")}>Remove</button>
+                  <button onClick={() => handleRemoveKey("gemini")}>
+                    Remove
+                  </button>
                 </div>
               ) : (
                 <div className="api-key-input-group">
@@ -2096,9 +2371,14 @@ function App() {
                     placeholder="Enter Gemini API key..."
                     value={geminiKeyInput}
                     onChange={(e) => setGeminiKeyInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSaveKey("gemini")}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && handleSaveKey("gemini")
+                    }
                   />
-                  <button className="eye-toggle" onClick={() => setShowGeminiKey(!showGeminiKey)}>
+                  <button
+                    className="eye-toggle"
+                    onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  >
                     {showGeminiKey ? <EyeOffIcon /> : <EyeIcon />}
                   </button>
                   <button onClick={() => handleSaveKey("gemini")}>Save</button>
@@ -2110,8 +2390,13 @@ function App() {
             {apiKeyStatus?.gemini_set && (
               <div className="model-toggle-row">
                 <div className="model-toggle-label">
-                  <span className="model-toggle-title">Gemini 3.1 Pro Preview</span>
-                  <span className="model-toggle-desc">Use Pro instead of Flash for Deep Analysis. Slower but higher quality.</span>
+                  <span className="model-toggle-title">
+                    Gemini 3.1 Pro Preview
+                  </span>
+                  <span className="model-toggle-desc">
+                    Use Pro instead of Flash for Deep Analysis. Slower but
+                    higher quality.
+                  </span>
                 </div>
                 <button
                   className={`toggle-switch ${apiKeyStatus.gemini_pro_enabled ? "toggle-on" : ""}`}
@@ -2130,7 +2415,9 @@ function App() {
               {apiKeyStatus?.openai_set ? (
                 <div className="api-key-saved">
                   <span className="key-hint">{apiKeyStatus.openai_hint}</span>
-                  <button onClick={() => handleRemoveKey("openai")}>Remove</button>
+                  <button onClick={() => handleRemoveKey("openai")}>
+                    Remove
+                  </button>
                 </div>
               ) : (
                 <div className="api-key-input-group">
@@ -2139,9 +2426,14 @@ function App() {
                     placeholder="Enter OpenAI API key..."
                     value={openaiKeyInput}
                     onChange={(e) => setOpenaiKeyInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSaveKey("openai")}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && handleSaveKey("openai")
+                    }
                   />
-                  <button className="eye-toggle" onClick={() => setShowOpenaiKey(!showOpenaiKey)}>
+                  <button
+                    className="eye-toggle"
+                    onClick={() => setShowOpenaiKey(!showOpenaiKey)}
+                  >
                     {showOpenaiKey ? <EyeOffIcon /> : <EyeIcon />}
                   </button>
                   <button onClick={() => handleSaveKey("openai")}>Save</button>
@@ -2152,24 +2444,41 @@ function App() {
             {/* Engine Mode Section */}
             <div className="api-key-section">
               <h4>Engine Mode</h4>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "8px",
+                }}
+              >
                 <span style={{ fontSize: "0.85rem", color: "#ccc" }}>
-                  {appConfig?.engineMode === "hybrid" ? "Stockfish + Lc0 (Advanced)" : "Stockfish Only (Standard)"}
+                  {appConfig?.engineMode === "hybrid"
+                    ? "Stockfish + Lc0 (Advanced)"
+                    : "Stockfish Only (Standard)"}
                 </span>
                 <button
                   className="action-button"
                   onClick={async () => {
                     if (appConfig?.engineMode === "hybrid") {
-                      await invoke("set_engine_mode", { mode: "stockfish_only" });
+                      await invoke("set_engine_mode", {
+                        mode: "stockfish_only",
+                      });
                     } else {
                       await invoke("set_engine_mode", { mode: "hybrid" });
                     }
                     const config = await invoke<AppConfig>("get_app_config");
                     setAppConfig(config);
                   }}
-                  style={{ flex: "none", padding: "6px 12px", fontSize: "0.78rem" }}
+                  style={{
+                    flex: "none",
+                    padding: "6px 12px",
+                    fontSize: "0.78rem",
+                  }}
                 >
-                  {appConfig?.engineMode === "hybrid" ? "Switch to Standard" : "Switch to Advanced"}
+                  {appConfig?.engineMode === "hybrid"
+                    ? "Switch to Standard"
+                    : "Switch to Advanced"}
                 </button>
               </div>
             </div>
@@ -2177,12 +2486,18 @@ function App() {
             {/* Info Box */}
             <div className="api-key-info">
               Adding your own API key unlocks deep thinking for Deep Analysis:
-              Gemini 3 Flash with thinking (high), or OpenAI o4-mini (reasoning model).
-              Without a key, Gemini 3 Flash is used without thinking.
+              Gemini 3 Flash with thinking (high), or OpenAI o4-mini (reasoning
+              model). Without a key, Gemini 3 Flash is used without thinking.
               Get a free Gemini key from{" "}
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" style={{ color: "#7ab3ff" }}>
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#7ab3ff" }}
+              >
                 Google AI Studio
-              </a>.
+              </a>
+              .
             </div>
           </div>
         </div>
