@@ -43,8 +43,41 @@ export function useLiveEngine() {
   const lastFireTime = useRef(0);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Batching: accumulate engine-line updates and flush once per frame
+  const pendingThoughts = useRef<Record<number, EngineThought>>({});
+  const pendingEval = useRef<string | null>(null);
+  const rafHandle = useRef<number | null>(null);
+
   const DEBOUNCE_MS = 200;
   const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+
+  const scheduleFlush = useCallback(() => {
+    if (rafHandle.current !== null) return;
+    rafHandle.current = requestAnimationFrame(() => {
+      rafHandle.current = null;
+      const thoughts = pendingThoughts.current;
+      const evalStr = pendingEval.current;
+      if (Object.keys(thoughts).length > 0) {
+        setEngineThoughts((prev) => {
+          const merged = { ...prev };
+          for (const key of Object.keys(thoughts)) {
+            const k = Number(key);
+            const incoming = thoughts[k];
+            const existing = merged[k];
+            if (!existing || incoming.depth >= existing.depth) {
+              merged[k] = incoming;
+            }
+          }
+          return merged;
+        });
+        pendingThoughts.current = {};
+      }
+      if (evalStr !== null) {
+        setEvaluation(evalStr);
+        pendingEval.current = null;
+      }
+    });
+  }, []);
 
   // ── Reset idle timer ────────────────────────────────────────
   const resetIdleTimer = useCallback(() => {
@@ -60,6 +93,12 @@ export function useLiveEngine() {
       lastFireTime.current = Date.now();
       currentFenRef.current = fen;
       evalDepthRef.current = 0;
+      pendingThoughts.current = {};
+      pendingEval.current = null;
+      if (rafHandle.current !== null) {
+        cancelAnimationFrame(rafHandle.current);
+        rafHandle.current = null;
+      }
       setEngineThoughts({});
       setEvaluation("");
       invoke("live_engine_set_fen", { fen }).catch(() => {});
@@ -94,6 +133,12 @@ export function useLiveEngine() {
   // ── New game (flushes hash tables) ──────────────────────────
   const newGame = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    pendingThoughts.current = {};
+    pendingEval.current = null;
+    if (rafHandle.current !== null) {
+      cancelAnimationFrame(rafHandle.current);
+      rafHandle.current = null;
+    }
     setEngineThoughts({});
     setEvaluation("");
     currentFenRef.current = "";
@@ -119,21 +164,18 @@ export function useLiveEngine() {
 
           const score = formatScore(e.scoreCp, e.scoreMate);
 
-          setEngineThoughts((prev) => {
-            const current = prev[e.multipv];
-            if (current && e.depth < current.depth) return prev;
-            return {
-              ...prev,
-              [e.multipv]: {
-                multipv: e.multipv,
-                depth: e.depth,
-                score,
-                moves: e.pvSan,
-                rawMoves: e.pvUci,
-                rawFirstMove: e.pvUci[0] || "",
-              },
+          // Buffer into pending ref — only keep if depth is >= existing
+          const existing = pendingThoughts.current[e.multipv];
+          if (!existing || e.depth >= existing.depth) {
+            pendingThoughts.current[e.multipv] = {
+              multipv: e.multipv,
+              depth: e.depth,
+              score,
+              moves: e.pvSan,
+              rawMoves: e.pvUci,
+              rawFirstMove: e.pvUci[0] || "",
             };
-          });
+          }
 
           // Update top-level evaluation from line 1
           if (
@@ -143,8 +185,10 @@ export function useLiveEngine() {
             e.depth >= evalDepthRef.current
           ) {
             evalDepthRef.current = e.depth;
-            setEvaluation(score);
+            pendingEval.current = score;
           }
+
+          scheduleFlush();
         },
       );
 
@@ -159,6 +203,7 @@ export function useLiveEngine() {
             setIsAnalyzing(false);
           } else if (status === "phase2") {
             // Clear thoughts for fresh widen pass
+            pendingThoughts.current = {};
             setEngineThoughts({});
           }
         },
@@ -187,8 +232,9 @@ export function useLiveEngine() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
       if (idleTimer.current) clearTimeout(idleTimer.current);
+      if (rafHandle.current !== null) cancelAnimationFrame(rafHandle.current);
     };
-  }, [resetIdleTimer]);
+  }, [resetIdleTimer, scheduleFlush]);
 
   // Inject stored evaluation data (e.g. from a saved report) and stop
   // the live engine so it doesn't overwrite the injected values.

@@ -711,6 +711,31 @@ function App() {
     }
   };
 
+  // ── Arrow key navigation ──────────────────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        moveBack();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        moveForward();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        moveToStart();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        moveToEnd();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentMoveIndex, gameHistory]);
+
   const flipBoard = () => {
     setBoardOrientation((prev) => (prev === "white" ? "black" : "white"));
   };
