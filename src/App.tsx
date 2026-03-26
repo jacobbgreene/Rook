@@ -730,11 +730,8 @@ function App() {
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
     setShowReportSetup(false);
-    setIncludeGreatMoves(false);
-    setAnalysisDepth(12);
     setSavedReportId(null);
     setSavedReportMeta(null);
-    setUseLc0(false);
   };
 
   const [importInput, setImportInput] = useState("");
@@ -808,11 +805,8 @@ function App() {
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
     setShowReportSetup(false);
-    setIncludeGreatMoves(false);
-    setAnalysisDepth(12);
     setSavedReportId(null);
     setSavedReportMeta(null);
-    setUseLc0(false);
   };
 
   const playLineToMove = (uciMoves: string[], targetIndex: number) => {
