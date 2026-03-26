@@ -275,6 +275,16 @@ function App() {
   const reportEvalsRef = useRef<PositionEval[] | null>(null);
   const mainLineRef = useRef<string[] | null>(null);
   const activeTabRef = useRef<string>("strategize");
+  const variationEvalsRef = useRef(
+    new Map<
+      string,
+      {
+        score: string;
+        thoughts: Record<number, import("./useLiveEngine").EngineThought>;
+      }
+    >(),
+  );
+  const variationReturnIdxRef = useRef<number | null>(null);
 
   const setReportEvaluations = (v: PositionEval[] | null) => {
     reportEvalsRef.current = v;
@@ -458,6 +468,14 @@ function App() {
         injectEval(score, positionEvalToThoughts(ev, fen));
         return;
       }
+    }
+
+    // When browsing a best-line variation, use precomputed evals from the PV
+    // instead of running the live engine.
+    const varEval = variationEvalsRef.current.get(fen);
+    if (varEval) {
+      injectEval(varEval.score, varEval.thoughts);
+      return;
     }
 
     startAnalysis(fen);
@@ -700,31 +718,6 @@ function App() {
     }
   };
 
-  // ── Arrow key navigation ──────────────────────────────────────
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      // Skip if user is typing in an input/textarea
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-
-      if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        moveBack();
-      } else if (e.key === "ArrowRight") {
-        e.preventDefault();
-        moveForward();
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        moveToStart();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        moveToEnd();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [currentMoveIndex, gameHistory]);
-
   const flipBoard = () => {
     setBoardOrientation((prev) => (prev === "white" ? "black" : "white"));
   };
@@ -745,6 +738,8 @@ function App() {
     setShowReportSetup(false);
     setSavedReportId(null);
     setSavedReportMeta(null);
+    variationEvalsRef.current.clear();
+    variationReturnIdxRef.current = null;
   };
 
   const [importInput, setImportInput] = useState("");
@@ -868,6 +863,8 @@ function App() {
     sanMoves: string[],
     targetIndex: number,
   ) => {
+    variationReturnIdxRef.current = currentMoveIndex;
+
     const historyIndex = gameHistory.indexOf(fen);
     const baseHistory =
       historyIndex >= 0
@@ -893,6 +890,75 @@ function App() {
         }
       } catch {
         break;
+      }
+    }
+
+    // Precompute evals for variation positions from the source PV
+    variationEvalsRef.current = new Map();
+    const srcEvals = reportEvalsRef.current;
+    const srcMainLine = mainLineRef.current;
+    if (srcEvals && srcMainLine) {
+      const srcIdx = srcMainLine.indexOf(fen);
+      if (srcIdx >= 0 && srcEvals[srcIdx]) {
+        const topLine = srcEvals[srcIdx].topLines[0];
+        if (topLine) {
+          const walker = new Chess(fen);
+          for (let d = 0; d < sanMoves.length; d++) {
+            try {
+              walker.move(sanMoves[d]);
+            } catch {
+              break;
+            }
+            const posFen = walker.fen();
+            const signedCp =
+              topLine.scoreCp !== null
+                ? (d % 2 === 0 ? -topLine.scoreCp : topLine.scoreCp)
+                : null;
+            const signedMate =
+              topLine.scoreMate !== null
+                ? (d % 2 === 0 ? -topLine.scoreMate : topLine.scoreMate)
+                : null;
+            const score =
+              signedMate !== null
+                ? `M${signedMate}`
+                : signedCp !== null
+                  ? (signedCp / 100).toFixed(2)
+                  : "";
+            const remainingPv = topLine.pv.slice(d + 1);
+            const pvWalker = new Chess(posFen);
+            const pvSan: string[] = [];
+            const pvUci: string[] = [];
+            for (const uci of remainingPv) {
+              if (uci.length < 4) break;
+              try {
+                const r = pvWalker.move({
+                  from: uci.slice(0, 2),
+                  to: uci.slice(2, 4),
+                  promotion: uci.length >= 5 ? uci[4] : undefined,
+                });
+                if (r) {
+                  pvSan.push(r.san);
+                  pvUci.push(uci);
+                } else break;
+              } catch {
+                break;
+              }
+            }
+            variationEvalsRef.current.set(posFen, {
+              score,
+              thoughts: {
+                1: {
+                  multipv: 1,
+                  depth: 15,
+                  score,
+                  moves: pvSan,
+                  rawMoves: pvUci,
+                  rawFirstMove: pvUci[0] || "",
+                },
+              },
+            });
+          }
+        }
       }
     }
 
@@ -1067,7 +1133,7 @@ function App() {
               color = "rgba(255, 165, 0, 0.4)";
               break;
             case "inaccuracy":
-              color = "rgba(255, 220, 80, 0.35)";
+              color = "rgba(240, 180, 50, 0.4)";
               break;
             case "turning_point":
               color = "rgba(80, 180, 255, 0.4)";
@@ -1111,6 +1177,8 @@ function App() {
       historyIndex >= mainLineHistory.length
     )
       return;
+    variationReturnIdxRef.current = null;
+    variationEvalsRef.current.clear();
     setGameHistory(mainLineHistory);
     setGameSanList(mainLineSanMoves || []);
     setCurrentMoveIndex(historyIndex);
@@ -1120,13 +1188,79 @@ function App() {
 
   const backToMainLine = () => {
     if (!mainLineHistory) return;
-    const targetIndex = Math.min(currentMoveIndex, mainLineHistory.length - 1);
+    const targetIndex =
+      variationReturnIdxRef.current !== null
+        ? Math.min(variationReturnIdxRef.current, mainLineHistory.length - 1)
+        : Math.min(currentMoveIndex, mainLineHistory.length - 1);
+    variationReturnIdxRef.current = null;
+    variationEvalsRef.current.clear();
     setGameHistory(mainLineHistory);
     setGameSanList(mainLineSanMoves || []);
     setCurrentMoveIndex(targetIndex);
     setGame(new Chess(mainLineHistory[targetIndex]));
     handlePositionChange(mainLineHistory[targetIndex]);
   };
+
+  // ── Keyboard navigation ──────────────────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        moveBack();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        moveForward();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        // In report mode on main line: enter the best line variation
+        if (
+          postGameReport &&
+          activeTab === "report" &&
+          !isExploringVariation &&
+          currentMoveIndex > 0
+        ) {
+          const i = currentMoveIndex - 1;
+          const moveNum = Math.floor(i / 2) + 1;
+          const side: "white" | "black" = i % 2 === 0 ? "white" : "black";
+          const moment = postGameReport.criticalMoments.find(
+            (m) =>
+              m.moveNumber === moveNum &&
+              m.side === side &&
+              m.bestLine.length > 0,
+          );
+          if (moment) {
+            playBestLine(moment.fen, moment.bestLine, 0);
+            return;
+          }
+        }
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        // In report mode exploring a variation: return to main line
+        if (isExploringVariation) {
+          backToMainLine();
+          return;
+        }
+      } else if (e.key === ",") {
+        e.preventDefault();
+        moveToStart();
+      } else if (e.key === ".") {
+        e.preventDefault();
+        moveToEnd();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    currentMoveIndex,
+    gameHistory,
+    postGameReport,
+    activeTab,
+    isExploringVariation,
+  ]);
 
   const loadSavedReport = async (id: string) => {
     try {
