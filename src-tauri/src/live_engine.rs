@@ -107,12 +107,8 @@ fn validate_fen(fen: &str) -> Result<(), String> {
 
 fn live_engine_config() -> (usize, usize) {
     let res = detect_system_resources();
-    let threads = if res.logical_cores > 8 {
-        res.logical_cores.saturating_sub(2).max(1)
-    } else {
-        res.logical_cores.saturating_sub(1).max(1)
-    };
-    let hash_mb = ((res.total_ram_mb as usize * 5) / 100).clamp(64, 1024);
+    let threads = (res.logical_cores / 2).max(1);
+    let hash_mb = ((res.total_ram_mb as usize * 2) / 100).clamp(64, 512);
     (hash_mb, threads)
 }
 

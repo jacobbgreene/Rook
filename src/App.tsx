@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { invoke } from "@tauri-apps/api/core";
-import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult } from "./gameAnalysis";
+import { runFullAnalysis, GameAnalysisReport, AnalysisPhase, SavedReport, SavedReportMeta, computeGameHash, determineGameResult, PositionEval } from "./gameAnalysis";
 import { useLiveEngine } from "./useLiveEngine";
 import { SetupWizard } from "./SetupWizard";
 import ReactMarkdown from "react-markdown";
@@ -258,6 +258,7 @@ function App() {
     startAnalysis,
     stopAnalysis,
     newGame: resetEngine,
+    injectEval,
   } = useLiveEngine();
   const [coachMessage, setCoachMessage] = useState("");
   const [isCoachLoading, setIsCoachLoading] = useState(false);
@@ -282,8 +283,21 @@ function App() {
   const [includeGreatMoves, setIncludeGreatMoves] = useState(false);
   const [analysisDepth, setAnalysisDepth] = useState<number>(12);
   const [mainLineHistory, setMainLineHistory] = useState<string[] | null>(null);
+  const [_reportEvaluations, _setReportEvaluations] = useState<PositionEval[] | null>(null);
   const [useLc0, setUseLc0] = useState(false);
   const [detailedReport, setDetailedReport] = useState(true);
+  const [pgnResult, setPgnResult] = useState<string | undefined>(undefined);
+
+  // Refs that always reflect the latest values — prevents stale closures
+  // in handlePositionChange from starting the live engine after async gaps.
+  // Updated eagerly (before React re-renders) via wrapper setters below.
+  const reportEvalsRef = useRef<PositionEval[] | null>(null);
+  const mainLineRef = useRef<string[] | null>(null);
+  const activeTabRef = useRef<string>("strategize");
+
+  const setReportEvaluations = (v: PositionEval[] | null) => { reportEvalsRef.current = v; _setReportEvaluations(v); };
+  const setMainLineHistoryTracked = (v: string[] | null) => { mainLineRef.current = v; setMainLineHistory(v); };
+  const setActiveTabTracked = (v: "strategize" | "analysis" | "report") => { activeTabRef.current = v; setActiveTab(v); };
 
   // App config for engine mode
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
@@ -372,17 +386,64 @@ function App() {
       .catch(() => setSavedReportMeta(null));
   }, [gameHistory]);
 
+  // Convert a stored PositionEval + FEN into display-ready EngineThought records.
+  const positionEvalToThoughts = (ev: PositionEval, fen: string): Record<number, import("./useLiveEngine").EngineThought> => {
+    const thoughts: Record<number, import("./useLiveEngine").EngineThought> = {};
+    const formatSc = (line: { scoreCp: number | null; scoreMate: number | null }) =>
+      line.scoreMate !== null ? `M${line.scoreMate}` : line.scoreCp !== null ? (line.scoreCp / 100).toFixed(2) : "";
+
+    for (let i = 0; i < ev.topLines.length; i++) {
+      const line = ev.topLines[i];
+      // Convert UCI PV to SAN
+      const g = new Chess(fen);
+      const sanMoves: string[] = [];
+      for (const uci of line.pv) {
+        if (uci.length < 4) break;
+        try {
+          const r = g.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length >= 5 ? uci[4] : undefined });
+          if (r) sanMoves.push(r.san); else break;
+        } catch { break; }
+      }
+      thoughts[i + 1] = {
+        multipv: i + 1,
+        depth: 15, // report analysis depth
+        score: formatSc(line),
+        moves: sanMoves,
+        rawMoves: line.pv,
+        rawFirstMove: line.pv[0] || "",
+      };
+    }
+    return thoughts;
+  };
+
   // Wrap startAnalysis to also clear coach message and handle game-over.
   // Callers that already have a Chess instance should pass gameOver directly
   // to avoid constructing a throwaway Chess object in the hot path.
   const handlePositionChange = (fen: string, gameOver?: boolean) => {
     setCoachMessage("");
     const isOver = gameOver ?? new Chess(fen).isGameOver();
-    if (!isOver) {
-      startAnalysis(fen);
-    } else {
+
+    if (isOver) {
       stopAnalysis();
+      return;
     }
+
+    // When browsing a report on the main line, use stored evaluations
+    // instead of running the live engine redundantly.
+    // Uses refs to avoid stale closure reads after async gaps.
+    const evals = reportEvalsRef.current;
+    const mainLine = mainLineRef.current;
+    if (activeTabRef.current === "report" && evals && mainLine) {
+      const idx = mainLine.indexOf(fen);
+      if (idx >= 0 && evals[idx]) {
+        const ev = evals[idx];
+        const score = ev.scoreMate !== null ? `M${ev.scoreMate}` : ev.scoreCp !== null ? (ev.scoreCp / 100).toFixed(2) : "";
+        injectEval(score, positionEvalToThoughts(ev, fen));
+        return;
+      }
+    }
+
+    startAnalysis(fen);
   };
 
   // Start analyzing the initial position on mount
@@ -452,7 +513,7 @@ function App() {
   const requestDeepAnalysis = async () => {
     if (isDeepAnalysisLoading) return;
     setIsDeepAnalysisLoading(true);
-    setActiveTab("analysis");
+    setActiveTabTracked("analysis");
     setDeepAnalysisAnnotations(null);
 
     try {
@@ -489,14 +550,16 @@ function App() {
   const requestPostGameReport = async () => {
     if (isPostGameLoading) return;
     setIsPostGameLoading(true);
-    setActiveTab("report");
+    setActiveTabTracked("report");
     setPostGameReport(null);
+    setReportEvaluations(null);
     setSavedReportId(null);
-    setMainLineHistory([...gameHistory]);
+    setMainLineHistoryTracked([...gameHistory]);
+    setBoardOrientation(reportPerspective);
     setAnalysisProgress({ phase: "engine", current: 0, total: gameHistory.length });
 
     try {
-      const report = await runFullAnalysis(
+      const { report, evaluations } = await runFullAnalysis(
         gameHistory,
         reportPerspective,
         (phase) => setAnalysisProgress(phase),
@@ -506,6 +569,7 @@ function App() {
         detailedReport,
       );
       setPostGameReport(report);
+      setReportEvaluations(evaluations);
       setCurrentMoveIndex(1);
       setGame(new Chess(gameHistory[1]));
       handlePositionChange(gameHistory[1]);
@@ -514,7 +578,7 @@ function App() {
       const gameHash = computeGameHash(gameHistory);
       const sanMoves = gameSanList;
       const openingMoves = buildPgn(sanMoves.slice(0, Math.min(sanMoves.length, 6)));
-      const result = determineGameResult(gameHistory, reportPerspective);
+      const result = determineGameResult(gameHistory, reportPerspective, pgnResult);
       const id = `rpt_${Date.now()}`;
       const savedReport: SavedReport = {
         id,
@@ -526,6 +590,7 @@ function App() {
         result,
         report,
         gameHistory: [...gameHistory],
+        evaluations,
       };
       await invoke("save_report", { report: savedReport });
       setSavedReportId(id);
@@ -659,10 +724,11 @@ function App() {
     setGameSanList([]);
     setCurrentMoveIndex(0);
     setBoardOrientation("white");
-    setActiveTab("strategize");
+    setActiveTabTracked("strategize");
     setDeepAnalysisAnnotations(null);
     setPostGameReport(null);
-    setMainLineHistory(null);
+    setMainLineHistoryTracked(null);
+    setReportEvaluations(null);
     setShowReportSetup(false);
     setIncludeGreatMoves(false);
     setAnalysisDepth(12);
@@ -707,6 +773,10 @@ function App() {
     }
 
     if (isPgn) {
+      // Extract PGN Result header (e.g. "1-0", "0-1", "1/2-1/2")
+      const headers = newGame.header();
+      setPgnResult(headers.Result || undefined);
+
       // Reconstruct the full timeline history if a PGN was imported
       const moves = newGame.history();
       const tempGame = new Chess();
@@ -722,6 +792,7 @@ function App() {
       setCurrentMoveIndex(fens.length - 1);
     } else {
       // It was a single FEN position
+      setPgnResult(undefined);
       setGameHistory([newGame.fen()]);
       setGameSanList([]);
       setCurrentMoveIndex(0);
@@ -731,10 +802,11 @@ function App() {
     handlePositionChange(newGame.fen());
     setGame(newGame);
     setImportInput("");
-    setActiveTab("strategize");
+    setActiveTabTracked("strategize");
     setDeepAnalysisAnnotations(null);
     setPostGameReport(null);
-    setMainLineHistory(null);
+    setMainLineHistoryTracked(null);
+    setReportEvaluations(null);
     setShowReportSetup(false);
     setIncludeGreatMoves(false);
     setAnalysisDepth(12);
@@ -879,8 +951,9 @@ function App() {
 
     const whitePercent =
       50 + 50 * (2 / (1 + Math.exp(-evalFromWhite * 0.3)) - 1);
-    const percent =
-      boardOrientation === "white" ? whitePercent : 100 - whitePercent;
+    // Bar always shows white's absolute advantage — white-colored portion
+    // grows when white is winning, shrinks when black is winning.
+    const percent = whitePercent;
     const perspectiveEval =
       boardOrientation === "white" ? evalFromWhite : -evalFromWhite;
 
@@ -1059,14 +1132,16 @@ function App() {
       const sans = reconstructSansFromHistory(saved.gameHistory);
       setGameHistory(saved.gameHistory);
       setGameSanList(sans);
-      setMainLineHistory(saved.gameHistory);
+      setMainLineHistoryTracked(saved.gameHistory);
       setReportPerspective(saved.perspective);
+      setBoardOrientation(saved.perspective);
       setPostGameReport(saved.report);
+      setReportEvaluations(saved.evaluations || null);
       setSavedReportId(saved.id);
+      setActiveTabTracked("report");
       setCurrentMoveIndex(0);
       setGame(new Chess(saved.gameHistory[0]));
       handlePositionChange(saved.gameHistory[0]);
-      setActiveTab("report");
       setShowSavedReportsModal(false);
     } catch (e) {
       console.error("Failed to load report:", e);
@@ -1604,19 +1679,19 @@ function App() {
             <div className="tab-bar">
               <button
                 className={`tab-button${activeTab === "strategize" ? " tab-active" : ""}`}
-                onClick={() => setActiveTab("strategize")}
+                onClick={() => setActiveTabTracked("strategize")}
               >
                 Strategize
               </button>
               <button
                 className={`tab-button${activeTab === "analysis" ? " tab-active" : ""}`}
-                onClick={() => setActiveTab("analysis")}
+                onClick={() => setActiveTabTracked("analysis")}
               >
                 Analysis
               </button>
               <button
                 className={`tab-button${activeTab === "report" ? " tab-active" : ""}`}
-                onClick={() => setActiveTab("report")}
+                onClick={() => setActiveTabTracked("report")}
               >
                 Report
                 {savedReportMeta && activeTab !== "report" && (
@@ -1629,7 +1704,8 @@ function App() {
                       e.stopPropagation();
                       setPostGameReport(null);
                       setIsPostGameLoading(false);
-                      setMainLineHistory(null);
+                      setMainLineHistoryTracked(null);
+                      setReportEvaluations(null);
                     }}
                     title="Close report"
                   >

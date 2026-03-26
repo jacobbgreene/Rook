@@ -21,6 +21,7 @@
 use crate::engine::{extract_i32, extract_pv};
 use crate::live_engine::uci_pv_to_san;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -183,6 +184,74 @@ fn drain_stderr(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// GPU Environment Augmentation
+// ═══════════════════════════════════════════════════════════════
+
+/// Augment a Command's environment so lc0 can discover GPU libraries.
+///
+/// GUI-launched processes often lack the `LD_LIBRARY_PATH` entries that
+/// a user's shell profile provides (CUDA toolkit paths, cuDNN, OpenCL).
+/// We add well-known locations that exist on disk so lc0's backend
+/// auto-detection can find GPU libraries and avoid falling back to the
+/// CPU-only `eigen` backend.
+#[cfg(unix)]
+fn augment_gpu_env(cmd: &mut Command) {
+    // Start from the current LD_LIBRARY_PATH (may be empty in GUI context)
+    let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let mut paths: Vec<String> = existing
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    // Derive paths from CUDA_HOME if set (e.g. /usr/local/cuda)
+    if let Ok(cuda_home) = std::env::var("CUDA_HOME") {
+        let lib64 = format!("{}/lib64", cuda_home);
+        let cupti = format!("{}/extras/CUPTI/lib64", cuda_home);
+        for p in [lib64, cupti] {
+            if Path::new(&p).is_dir() && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+
+    // Well-known GPU library locations on Linux
+    let candidates: &[&str] = &[
+        "/usr/local/cuda/lib64",
+        "/usr/local/cuda/extras/CUPTI/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/opt/cuda/lib64",
+    ];
+
+    for &p in candidates {
+        let s = p.to_string();
+        if Path::new(p).is_dir() && !paths.contains(&s) {
+            paths.push(s);
+        }
+    }
+
+    let joined = paths.join(":");
+    eprintln!("[lc0] Augmented LD_LIBRARY_PATH: {}", joined);
+    cmd.env("LD_LIBRARY_PATH", joined);
+
+    // Ensure the CUDA JIT cache directory exists and is set.
+    // Without this, PTX → native recompilation happens every launch.
+    let cache_dir = std::env::var("HOME")
+        .map(|h| Path::new(&h).join(".nv").join("ComputeCache"))
+        .unwrap_or_else(|_| Path::new("/tmp/.nv/ComputeCache").to_path_buf());
+    let _ = std::fs::create_dir_all(&cache_dir);
+    cmd.env("CUDA_CACHE_PATH", &cache_dir);
+    cmd.env("CUDA_CACHE_DISABLE", "0");
+    cmd.env("CUDA_CACHE_MAXSIZE", "268435456"); // 256 MB
+}
+
+#[cfg(not(unix))]
+fn augment_gpu_env(_cmd: &mut Command) {
+    // Windows: CUDA installer adds to PATH; no extra help needed.
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Core: Sequential GPU Evaluation
 // ═══════════════════════════════════════════════════════════════
 
@@ -210,6 +279,7 @@ pub async fn run_lc0_pass(
     // Weights are passed via UCI setoption, not CLI args, for
     // maximum compatibility across Lc0 versions.
     let mut cmd = Command::new(lc0_path);
+    augment_gpu_env(&mut cmd);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -338,6 +408,49 @@ pub async fn run_lc0_pass(
         "[lc0] Warm-up complete. Backend: {}, analysing {} positions at {} nodes each",
         detected_backend, total, nodes,
     );
+
+    // If lc0 fell back to a CPU backend, log diagnostics so the user
+    // can figure out what's missing.
+    let cpu_backends = ["eigen", "trivial", "random"];
+    if cpu_backends.iter().any(|b| detected_backend == *b) {
+        eprintln!(
+            "[lc0] WARNING: CPU-only backend '{}' detected. \
+             GPU acceleration is NOT active.",
+            detected_backend
+        );
+        eprintln!(
+            "[lc0]   LD_LIBRARY_PATH = {:?}",
+            std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
+        );
+        // Check for common CUDA/OpenCL libraries
+        let gpu_libs: &[(&str, &str)] = &[
+            ("libcuda.so",    "NVIDIA driver (CUDA)"),
+            ("libcudart.so",  "CUDA runtime toolkit"),
+            ("libcudnn.so",   "cuDNN"),
+            ("libOpenCL.so",  "OpenCL runtime"),
+        ];
+        for (lib, desc) in gpu_libs {
+            let found = std::process::Command::new("ldconfig")
+                .args(["-p"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let out = String::from_utf8_lossy(&o.stdout).to_string();
+                    if out.contains(lib) { Some(true) } else { None }
+                })
+                .is_some();
+            eprintln!(
+                "[lc0]   {} ({}): {}",
+                lib,
+                desc,
+                if found { "FOUND" } else { "NOT FOUND" }
+            );
+        }
+        eprintln!(
+            "[lc0]   Ensure your lc0 binary was compiled with GPU support \
+             and that the matching runtime libraries are installed."
+        );
+    }
 
     // ── Sequential position evaluation ──────────────────────────
     let mut results = Vec::with_capacity(total);

@@ -71,6 +71,7 @@ export interface SavedReport {
   result: GameResult;
   report: GameAnalysisReport;
   gameHistory: string[];
+  evaluations?: PositionEval[];
 }
 
 export interface SavedReportMeta {
@@ -103,7 +104,11 @@ export function computeGameHash(positions: string[]): string {
 }
 
 /** Determine the game result from the perspective of the given side. */
-export function determineGameResult(gameHistory: string[], perspective: string): GameResult {
+export function determineGameResult(
+  gameHistory: string[],
+  perspective: string,
+  pgnResult?: string,
+): GameResult {
   if (gameHistory.length <= 1) return "unknown";
   const finalFen = gameHistory[gameHistory.length - 1];
   const game = new Chess(finalFen);
@@ -117,8 +122,17 @@ export function determineGameResult(gameHistory: string[], perspective: string):
   if (game.isDraw() || game.isStalemate()) {
     return "draw";
   }
-  // Game didn't end in a terminal position (e.g. resignation, or game still in progress).
-  // Use the final evaluation heuristic: check the last eval if available, otherwise unknown.
+  // Game didn't end in a terminal position (e.g. resignation, timeout).
+  // Fall back to PGN Result header if available.
+  if (pgnResult === "1-0") {
+    return perspective === "white" ? "win" : "loss";
+  }
+  if (pgnResult === "0-1") {
+    return perspective === "white" ? "loss" : "win";
+  }
+  if (pgnResult === "1/2-1/2") {
+    return "draw";
+  }
   return "unknown";
 }
 
@@ -318,6 +332,11 @@ export function filterCriticalMoments(
 // Full Pipeline Orchestrator
 // ═══════════════════════════════════════════════════════════════
 
+export interface FullAnalysisResult {
+  report: GameAnalysisReport;
+  evaluations: PositionEval[];
+}
+
 export async function runFullAnalysis(
   gameHistory: string[],
   perspective: string,
@@ -326,7 +345,7 @@ export async function runFullAnalysis(
   includeGreatMoves: boolean = false,
   hybridMode: boolean = false,
   detailedReport: boolean = true,
-): Promise<GameAnalysisReport> {
+): Promise<FullAnalysisResult> {
   // Step 1 — Reconstruct SAN moves from the FEN history
   const sanMoves: string[] = [];
   for (let i = 0; i < gameHistory.length - 1; i++) {
@@ -447,5 +466,8 @@ export async function runFullAnalysis(
   }
 
   onProgress?.({ phase: "complete" });
-  return { criticalMoments: explained, thematicSummary };
+  return {
+    report: { criticalMoments: explained, thematicSummary },
+    evaluations,
+  };
 }

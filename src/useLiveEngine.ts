@@ -190,6 +190,21 @@ export function useLiveEngine() {
     };
   }, [resetIdleTimer]);
 
+  // Inject stored evaluation data (e.g. from a saved report) and stop
+  // the live engine so it doesn't overwrite the injected values.
+  const injectEval = useCallback(
+    (eval_: string, thoughts: Record<number, EngineThought>) => {
+      invoke("live_engine_stop").catch(() => {});
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      currentFenRef.current = "";
+      evalDepthRef.current = 99;
+      setEvaluation(eval_);
+      setEngineThoughts(thoughts);
+      setIsAnalyzing(false);
+    },
+    [],
+  );
+
   return {
     engineThoughts,
     evaluation,
@@ -197,6 +212,7 @@ export function useLiveEngine() {
     startAnalysis,
     stopAnalysis,
     newGame,
+    injectEval,
   };
 }
 

@@ -64,21 +64,20 @@ pub struct WorkerPoolConfig {
 
 /// Compute an optimal worker layout based on available hardware.
 ///
-/// Reserves 2 cores for the OS / Tauri UI so the desktop stays responsive.
-/// Remaining cores are split: each Stockfish instance gets 2 threads
-/// (or 1 on very constrained machines). Hash is capped at 256 MB/worker.
+/// Uses half the available cores and ~10% of RAM to stay responsive.
+/// Each Stockfish instance gets 2 threads (or 1 on constrained machines).
+/// Hash is capped at 128 MB/worker.
 pub fn calculate_worker_config(resources: &SystemResources) -> WorkerPoolConfig {
-    let available_cores = resources.logical_cores.saturating_sub(2).max(1);
+    let available_cores = (resources.logical_cores / 2).max(1);
 
     let threads_per_worker = if available_cores >= 4 { 2 } else { 1 };
     let num_workers = (available_cores / threads_per_worker).max(1);
 
-    // ~25 % of total RAM for hash tables, divided among workers
-    let available_ram_mb = (resources.total_ram_mb / 4) as usize;
+    let available_ram_mb = (resources.total_ram_mb / 10) as usize;
     let hash_mb_per_worker = if num_workers > 0 {
-        (available_ram_mb / num_workers).clamp(64, 256)
+        (available_ram_mb / num_workers).clamp(64, 128)
     } else {
-        128
+        64
     };
 
     WorkerPoolConfig {
