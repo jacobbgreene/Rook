@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use sysinfo::System;
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
@@ -43,8 +43,15 @@ pub struct SystemResources {
 }
 
 /// Detect the host machine's logical CPU cores and total RAM.
+///
+/// Uses a targeted refresh (CPU + memory only) instead of `System::new_all()`
+/// to avoid the cost of enumerating processes, disks, networks, and components.
 pub fn detect_system_resources() -> SystemResources {
-    let sys = System::new_all();
+    let sys = System::new_with_specifics(
+        RefreshKind::new()
+            .with_cpu(CpuRefreshKind::everything())
+            .with_memory(MemoryRefreshKind::everything()),
+    );
     SystemResources {
         logical_cores: sys.cpus().len().max(1),
         total_ram_mb: sys.total_memory() / (1024 * 1024),

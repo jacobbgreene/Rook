@@ -314,6 +314,8 @@ struct SavedReport {
     game_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     evaluations: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_san_list: Option<Vec<String>>,
 }
 
 fn default_result() -> String {

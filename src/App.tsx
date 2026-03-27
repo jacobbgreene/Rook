@@ -274,6 +274,8 @@ function App() {
   // Updated eagerly (before React re-renders) via wrapper setters below.
   const reportEvalsRef = useRef<PositionEval[] | null>(null);
   const mainLineRef = useRef<string[] | null>(null);
+  const mainLineSansRef = useRef<string[] | null>(null);
+  const mainLineIndexRef = useRef<Map<string, number> | null>(null);
   const activeTabRef = useRef<string>("strategize");
   const variationEvalsRef = useRef(
     new Map<
@@ -290,8 +292,16 @@ function App() {
     reportEvalsRef.current = v;
     _setReportEvaluations(v);
   };
-  const setMainLineHistoryTracked = (v: string[] | null) => {
+  const setMainLineHistoryTracked = (v: string[] | null, sans?: string[] | null) => {
     mainLineRef.current = v;
+    mainLineSansRef.current = sans ?? null;
+    if (v) {
+      const map = new Map<string, number>();
+      for (let i = 0; i < v.length; i++) map.set(v[i], i);
+      mainLineIndexRef.current = map;
+    } else {
+      mainLineIndexRef.current = null;
+    }
     setMainLineHistory(v);
   };
   const setActiveTabTracked = (v: "strategize" | "analysis" | "report") => {
@@ -454,9 +464,9 @@ function App() {
     // instead of running the live engine redundantly.
     // Uses refs to avoid stale closure reads after async gaps.
     const evals = reportEvalsRef.current;
-    const mainLine = mainLineRef.current;
-    if (activeTabRef.current === "report" && evals && mainLine) {
-      const idx = mainLine.indexOf(fen);
+    const mainLineIndex = mainLineIndexRef.current;
+    if (activeTabRef.current === "report" && evals && mainLineIndex) {
+      const idx = mainLineIndex.get(fen) ?? -1;
       if (idx >= 0 && evals[idx]) {
         const ev = evals[idx];
         const score =
@@ -555,7 +565,7 @@ function App() {
     setPostGameReport(null);
     setReportEvaluations(null);
     setSavedReportId(null);
-    setMainLineHistoryTracked([...gameHistory]);
+    setMainLineHistoryTracked([...gameHistory], [...gameSanList]);
     setBoardOrientation(reportPerspective);
     setAnalysisProgress({
       phase: "engine",
@@ -603,6 +613,7 @@ function App() {
         report,
         gameHistory: [...gameHistory],
         evaluations,
+        gameSanList: [...gameSanList],
       };
       await invoke("save_report", { report: savedReport });
       setSavedReportId(id);
@@ -896,9 +907,9 @@ function App() {
     // Precompute evals for variation positions from the source PV
     variationEvalsRef.current = new Map();
     const srcEvals = reportEvalsRef.current;
-    const srcMainLine = mainLineRef.current;
-    if (srcEvals && srcMainLine) {
-      const srcIdx = srcMainLine.indexOf(fen);
+    const srcIndex = mainLineIndexRef.current;
+    if (srcEvals && srcIndex) {
+      const srcIdx = srcIndex.get(fen) ?? -1;
       if (srcIdx >= 0 && srcEvals[srcIdx]) {
         const topLine = srcEvals[srcIdx].topLines[0];
         if (topLine) {
@@ -1027,11 +1038,19 @@ function App() {
     let isMate = false;
     let mateNum = 0;
 
-    if (evaluation.startsWith("M")) {
+    // Checkmate: determine winner from the board state directly, since the
+    // evaluation string may be stale from the previous position.
+    if (game.isCheckmate()) {
+      isMate = true;
+      mateNum = 0;
+      // Side to move is the loser
+      const whiteWon = isBlackTurn;
+      evalFromWhite = whiteWon ? Infinity : -Infinity;
+    } else if (evaluation.startsWith("M")) {
       isMate = true;
       mateNum = parseInt(evaluation.slice(1));
       const whiteMating = isBlackTurn ? mateNum < 0 : mateNum > 0;
-      evalFromWhite = whiteMating ? 10 : -10;
+      evalFromWhite = whiteMating ? Infinity : -Infinity;
     } else {
       const raw = parseFloat(evaluation);
       evalFromWhite = isBlackTurn ? -raw : raw;
@@ -1101,6 +1120,10 @@ function App() {
 
   const mainLineSanMoves = useMemo(() => {
     if (!mainLineHistory) return null;
+    // Use pre-cached SANs if available (avoids O(n²) reconstruction)
+    if (mainLineSansRef.current && mainLineSansRef.current.length === mainLineHistory.length - 1) {
+      return mainLineSansRef.current;
+    }
     return reconstructSansFromHistory(mainLineHistory);
   }, [mainLineHistory]);
 
@@ -1164,11 +1187,17 @@ function App() {
     }
   }, [currentMoveIndex, gameHistory, gameSanList, postGameReport, activeTab]);
 
-  const isExploringVariation =
-    activeTab === "report" &&
-    mainLineHistory !== null &&
-    (gameHistory.length !== mainLineHistory.length ||
-      gameHistory.some((fen, i) => mainLineHistory[i] !== fen));
+  const isExploringVariation = useMemo(() => {
+    if (activeTab !== "report" || mainLineHistory === null) return false;
+    // Fast path: same reference means identical content
+    if (gameHistory === mainLineHistory) return false;
+    // Length mismatch is a quick divergence check
+    if (gameHistory.length !== mainLineHistory.length) return true;
+    for (let i = 0; i < gameHistory.length; i++) {
+      if (gameHistory[i] !== mainLineHistory[i]) return true;
+    }
+    return false;
+  }, [activeTab, mainLineHistory, gameHistory]);
 
   const navigateToMainLineMove = (historyIndex: number) => {
     if (
@@ -1265,10 +1294,10 @@ function App() {
   const loadSavedReport = async (id: string) => {
     try {
       const saved = await invoke<SavedReport>("load_report", { id });
-      const sans = reconstructSansFromHistory(saved.gameHistory);
+      const sans = saved.gameSanList || reconstructSansFromHistory(saved.gameHistory);
       setGameHistory(saved.gameHistory);
       setGameSanList(sans);
-      setMainLineHistoryTracked(saved.gameHistory);
+      setMainLineHistoryTracked(saved.gameHistory, sans);
       setReportPerspective(saved.perspective);
       setBoardOrientation(saved.perspective);
       setPostGameReport(saved.report);

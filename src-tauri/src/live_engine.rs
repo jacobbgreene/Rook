@@ -13,6 +13,7 @@ use shakmaty::fen::Fen;
 use shakmaty::san::San;
 use shakmaty::uci::UciMove;
 use shakmaty::{CastlingMode, Chess, Position};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -31,14 +32,14 @@ pub struct EngineLineEvent {
     pub score_mate: Option<i32>,
     pub pv_uci: Vec<String>,
     pub pv_san: Vec<String>,
-    pub fen: String,
+    pub fen: Arc<str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatusEvent {
     pub status: String,
-    pub fen: String,
+    pub fen: Arc<str>,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -163,7 +164,7 @@ pub fn spawn_live_engine(app: AppHandle, stockfish_path: String) -> LiveEngineHa
                 "engine-status",
                 EngineStatusEvent {
                     status: "error".to_string(),
-                    fen: String::new(),
+                    fen: Arc::from(""),
                 },
             );
         }
@@ -264,14 +265,14 @@ async fn live_engine_task(
         "engine-status",
         EngineStatusEvent {
             status: "ready".to_string(),
-            fen: String::new(),
+            fen: Arc::from(""),
         },
     );
 
     // ── Main Loop ─────────────────────────────────────────────
     let mut state = State::Idle;
     let mut pending: Option<PendingAction> = None;
-    let mut current_fen = String::new();
+    let mut current_fen: Arc<str> = Arc::from("");
     let mut widened = false;
     let mut buf = String::new();
 
@@ -290,7 +291,8 @@ async fn live_engine_task(
                     .await?;
                     send(&mut writer, &format!("position fen {}", fen)).await?;
                     send(&mut writer, "go infinite").await?;
-                    current_fen = fen.clone();
+                    let fen: Arc<str> = Arc::from(fen);
+                    current_fen = Arc::clone(&fen);
                     widened = false;
                     state = State::Searching;
                     let _ = app.emit(
@@ -405,7 +407,8 @@ async fn live_engine_task(
                                         send(&mut writer, "setoption name MultiPV value 3").await?;
                                         send(&mut writer, &format!("position fen {}", fen)).await?;
                                         send(&mut writer, "go infinite").await?;
-                                        current_fen = fen.clone();
+                                        let fen: Arc<str> = Arc::from(fen);
+                                        current_fen = Arc::clone(&fen);
                                         widened = false;
                                         state = State::Searching;
                                         let _ = app.emit("engine-status", EngineStatusEvent {
@@ -431,12 +434,12 @@ async fn live_engine_task(
                                     send(&mut writer, "ucinewgame").await?;
                                     send(&mut writer, "isready").await?;
                                     wait_for(&mut reader, "readyok").await?;
-                                    current_fen.clear();
+                                    current_fen = Arc::from("");
                                     widened = false;
                                     state = State::Idle;
                                     let _ = app.emit("engine-status", EngineStatusEvent {
                                         status: "ready".to_string(),
-                                        fen: String::new(),
+                                        fen: Arc::from(""),
                                     });
                                 }
                                 Some(PendingAction::GoIdle) | None => {

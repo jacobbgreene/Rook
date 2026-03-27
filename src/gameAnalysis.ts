@@ -72,6 +72,7 @@ export interface SavedReport {
   report: GameAnalysisReport;
   gameHistory: string[];
   evaluations?: PositionEval[];
+  gameSanList?: string[];
 }
 
 export interface SavedReportMeta {
