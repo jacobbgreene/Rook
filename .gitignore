@@ -28,3 +28,7 @@ dist-ssr
 
 # Nix / direnv
 .direnv/
+
+# Environment files with secrets (.envrc is tracked and safe)
+.env
+.env.*
