@@ -14,6 +14,18 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+/// System prompt for the report pipeline (critical-moment explanations and
+/// thematic summaries).  Single source of truth — maintained in
+/// `src-tauri/src/prompts/chess-coach.md`.
+const COACH_SYSTEM_PROMPT: &str = include_str!("prompts/chess-coach.md");
+
+const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
+const GEMINI_PRO_MODEL: &str = "gemini-3.1-pro-preview";
+
+fn gemini_model(use_pro: bool) -> &'static str {
+    if use_pro { GEMINI_PRO_MODEL } else { GEMINI_FLASH_MODEL }
+}
+
 // ── Context-Injection Pipeline types ──────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -32,6 +44,12 @@ struct CriticalMomentData {
     lc0_wdl: Option<Vec<u32>>,
     lc0_top_move: Option<String>,
     lc0_line: Option<Vec<String>>,
+    // Trap context (present when category == "trap")
+    bait_move_san: Option<String>,
+    refutation_line: Option<Vec<String>>,
+    refutation_eval: Option<f64>,
+    // What the move also qualifies as (e.g. a capitalized trap)
+    secondary_category: Option<String>,
 }
 
 fn build_lc0_context(m: &CriticalMomentData) -> String {
@@ -54,7 +72,11 @@ fn build_lc0_context(m: &CriticalMomentData) -> String {
     String::new()
 }
 
-fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> String {
+fn build_critical_moment_prompt(
+    m: &CriticalMomentData,
+    perspective: &str,
+    session_log: Option<&str>,
+) -> String {
     let category_desc = match m.category.as_str() {
         "blunder" => "a serious blunder",
         "mistake" => "a significant mistake",
@@ -62,6 +84,9 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
         "turning_point" => "a critical turning point",
         "great_move" => "a great move",
         "critical" => "a critical move",
+        "brilliant" => "a brilliant move",
+        "trap" => "a cunning trap",
+        "capitalized" => "a well-timed punishment of the opponent's mistake",
         "opportunity" => "a mistake by the opponent (an opportunity for you)",
         "golden_opportunity" => "a serious blunder by the opponent (a golden opportunity for you)",
         _ => "a notable moment",
@@ -72,10 +97,137 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
 
     let is_great_move = m.category == "great_move";
     let is_critical = m.category == "critical";
+    let is_brilliant = m.category == "brilliant";
+    let is_trap = m.category == "trap";
+    let is_capitalized = m.category == "capitalized";
 
     let lc0_ctx = build_lc0_context(m);
 
-    if is_player_move && is_critical {
+    let prompt = if is_player_move && is_capitalized {
+        let secondary_note = match m.secondary_category.as_deref() {
+            Some("trap") => {
+                let bait = m.bait_move_san.as_deref().unwrap_or("the tempting reply");
+                let refutation = m
+                    .refutation_line
+                    .as_ref()
+                    .map(|l| l.join(" "))
+                    .unwrap_or_default();
+                format!(
+                    "\nThis move also works as a trap: the tempting {} loses to {}.",
+                    bait, refutation
+                )
+            }
+            Some("brilliant") => "\nThis move is also a brilliant sacrifice.".to_string(),
+            Some("critical") => {
+                "\nThis was also the only strong move in a sharp position.".to_string()
+            }
+            _ => String::new(),
+        };
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num})\n\
+            The opponent's previous move slipped by {drop:.1} pawns, and you seized on it with {san}.\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
+            {secondary}\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Acknowledge that they recognized and seized the opportunity — be encouraging but factual.\n\
+            2. Why {san} was the right way to punish the mistake — the tactical or strategic idea behind it.\n\
+            Only reference moves that appear in this data — never invent move sequences.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            drop = m.eval_drop,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
+            secondary = secondary_note,
+        )
+    } else if is_player_move && is_trap {
+        let bait = m.bait_move_san.as_deref().unwrap_or("the tempting reply");
+        let refutation = m
+            .refutation_line
+            .as_ref()
+            .map(|l| l.join(" "))
+            .unwrap_or_default();
+        let ref_eval = m.refutation_eval.unwrap_or(0.0);
+        // Never leave a dangling "loses to <blank>" — an empty refutation
+        // invites the model to invent moves that were never calculated.
+        let (refutation_clause, refutation_instruction) = if refutation.is_empty() {
+            (
+                format!(
+                    "The tempting reply {bait} fails on positional grounds \
+                     (evaluation after it: {ref_eval:+.2} pawns in your favor).",
+                ),
+                String::from(
+                    "Why the bait fails and what the opponent should have played instead.",
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "The hidden point: the tempting reply {bait} loses to {refutation} \
+                     (evaluation after the bait: {ref_eval:+.2} pawns in your favor).",
+                ),
+                format!(
+                    "The tactical idea behind the refutation ({refutation}) and what the opponent should have played instead.",
+                ),
+            )
+        };
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position after the player's move (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num})\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            {refutation_clause}\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Why your move {san} sets a trap — what the opponent is tempted to grab with {bait} and why it is poisoned.\n\
+            2. {refutation_instruction}\n\
+            Only reference moves that appear in this data — never invent move sequences.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            refutation_clause = refutation_clause,
+            refutation_instruction = refutation_instruction,
+            line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
+        )
+    } else if is_player_move && is_brilliant {
+        format!(
+            "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
+            Position (FEN): {fen}\n\
+            You (playing {perspective}) played: {san} (Move {num}) — a sacrifice!\n\
+            Evaluation before: {eb:+.2} pawns (from white's perspective)\n\
+            Evaluation after: {ea:+.2} pawns\n\
+            Stockfish's top line: {line}\n\
+            {lc0}\n\
+            In 2-3 concise sentences, explain to the player:\n\
+            1. Why your move {san} is brilliant — you gave up material, so explain what compensation (attack, initiative, king exposure, structure) it buys.\n\
+            2. Why the position remains sound and what the follow-up plan is.\n\
+            Address the player directly as \"you\".",
+            perspective = perspective,
+            fen = m.fen,
+            san = m.move_san,
+            num = m.move_number,
+            eb = m.eval_before,
+            ea = m.eval_after,
+            line = m.best_line.join(" "),
+            lc0 = lc0_ctx,
+        )
+    } else if is_player_move && is_critical {
         format!(
             "You are a chess coach giving targeted feedback to the {perspective} player.\n\n\
             Position (FEN): {fen}\n\
@@ -178,6 +330,16 @@ fn build_critical_moment_prompt(m: &CriticalMomentData, perspective: &str) -> St
             line = m.best_line.join(" "),
             lc0 = lc0_ctx,
         )
+    };
+
+    // Narrative continuity: the coach sees a one-line digest of earlier
+    // moments so explanations can reference the game's unfolding story.
+    match session_log {
+        Some(log) if !log.is_empty() => format!(
+            "{}\n\nEarlier moments from this game (for narrative continuity — reference them when relevant):\n{}",
+            prompt, log
+        ),
+        _ => prompt,
     }
 }
 
@@ -214,7 +376,33 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
             .filter(|w| w.len() == 3)
             .map(|w| format!(" [Lc0 WDL: {:.1}%/{:.1}%/{:.1}%]", w[0] as f64 / 10.0, w[1] as f64 / 10.0, w[2] as f64 / 10.0))
             .unwrap_or_default();
-        if m.category == "critical" {
+        if m.category == "trap" {
+            let bait = m.bait_move_san.as_deref().unwrap_or("the tempting reply");
+            let refutation = m
+                .refutation_line
+                .as_ref()
+                .map(|l| l.join(" "))
+                .unwrap_or_default();
+            prompt += &format!(
+                "- Move {} ({}): Played {} — a trap! The tempting {} loses to {}.{}\n",
+                m.move_number, whose, m.move_san, bait, refutation, wdl_str,
+            );
+        } else if m.category == "capitalized" {
+            let secondary = m
+                .secondary_category
+                .as_deref()
+                .map(|s| format!(" (also a {})", s.replace('_', " ")))
+                .unwrap_or_default();
+            prompt += &format!(
+                "- Move {} ({}): Played {} — capitalized on the opponent's mistake{} (gained {:.1} pawns).{}\n",
+                m.move_number, whose, m.move_san, secondary, m.eval_drop, wdl_str,
+            );
+        } else if m.category == "brilliant" {
+            prompt += &format!(
+                "- Move {} ({}): Played {} — a brilliant sacrifice, eval gain: {:.1} pawns.{}\n",
+                m.move_number, whose, m.move_san, -m.eval_drop, wdl_str,
+            );
+        } else if m.category == "critical" {
             prompt += &format!(
                 "- Move {} ({}): Played {}. Category: critical, eval gain: {:.1} pawns. Found the only strong move in a complex position.{}\n",
                 m.move_number, whose, m.move_san, -m.eval_drop, wdl_str,
@@ -272,13 +460,15 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
 
 // ── Key resolution helper ────────────────────────────────────
 
-fn resolve_api_keys(state: &Mutex<ApiKeys>) -> Result<(String, String), String> {
+/// Resolve (gemini_key, openai_key, use_gemini_pro).  User-configured keys
+/// take priority over the environment-variable fallbacks.
+fn resolve_api_keys(state: &Mutex<ApiKeys>) -> Result<(String, String, bool), String> {
     let keys = state.lock().map_err(|e| e.to_string())?;
     let gemini = keys.gemini_api_key.clone().unwrap_or_default();
     let openai = keys.openai_api_key.clone().unwrap_or_default();
     let gemini = if gemini.is_empty() { env::var("GEMINI_API_KEY").unwrap_or_default() } else { gemini };
     let openai = if openai.is_empty() { env::var("OPENAI_API_KEY").unwrap_or_default() } else { openai };
-    Ok((gemini, openai))
+    Ok((gemini, openai, keys.use_gemini_pro))
 }
 
 // ── Persistence ──────────────────────────────────────────────
@@ -310,6 +500,9 @@ struct SavedReport {
     opening_moves: String,
     #[serde(default = "default_result")]
     result: String,
+    /// Optional user-assigned display name (e.g. "Club game vs. Alex").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     report: GameAnalysisReportData,
     game_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,15 +550,38 @@ struct SavedReportMeta {
     critical_moment_count: u32,
     #[serde(default = "default_result")]
     result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
-fn get_reports_dir(app: &tauri::AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap().join("reports")
+fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data directory: {}", e))
 }
 
-fn ensure_reports_dir(app: &tauri::AppHandle) {
-    let dir = get_reports_dir(app);
-    let _ = fs::create_dir_all(&dir);
+fn get_reports_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("reports"))
+}
+
+fn ensure_reports_dir(app: &tauri::AppHandle) -> Result<(), String> {
+    let dir = get_reports_dir(app)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create reports directory: {}", e))
+}
+
+/// Report IDs become filenames — reject anything that could escape the
+/// reports directory (path traversal).
+fn validate_report_id(id: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err("Invalid report ID".to_string())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -377,8 +593,8 @@ struct ApiKeyStatus {
     gemini_pro_enabled: bool,
 }
 
-fn get_keys_file_path(app: &tauri::AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap().join("api_keys.json")
+fn get_keys_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("api_keys.json"))
 }
 
 fn load_keys_from_disk(path: &PathBuf) -> ApiKeys {
@@ -388,16 +604,35 @@ fn load_keys_from_disk(path: &PathBuf) -> ApiKeys {
         .unwrap_or_default()
 }
 
-fn save_keys_to_disk(path: &PathBuf, keys: &ApiKeys) {
+fn save_keys_to_disk(path: &PathBuf, keys: &ApiKeys) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let _ = fs::write(path, serde_json::to_string_pretty(keys).unwrap_or_default());
+    let json = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())?;
+    // The file contains secrets — restrict to owner read/write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 fn make_hint(key: &Option<String>) -> String {
     match key {
-        Some(k) if k.len() >= 4 => format!("\u{2022}\u{2022}\u{2022}\u{2022}{}", &k[k.len()-4..]),
+        Some(k) if k.chars().count() >= 4 => {
+            // Char-based slice — a byte slice could panic on multi-byte UTF-8.
+            let tail: String = k
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("\u{2022}\u{2022}\u{2022}\u{2022}{}", tail)
+        }
         Some(_) => "\u{2022}\u{2022}\u{2022}\u{2022}".to_string(),
         None => String::new(),
     }
@@ -423,7 +658,7 @@ fn save_api_key(provider: String, key: String, state: tauri::State<'_, AppState>
         "openai" => keys.openai_api_key = Some(key),
         _ => return Err(format!("Unknown provider: {}", provider)),
     }
-    save_keys_to_disk(&get_keys_file_path(&app), &keys);
+    save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
     Ok(())
 }
 
@@ -435,7 +670,7 @@ fn remove_api_key(provider: String, state: tauri::State<'_, AppState>, app: taur
         "openai" => keys.openai_api_key = None,
         _ => return Err(format!("Unknown provider: {}", provider)),
     }
-    save_keys_to_disk(&get_keys_file_path(&app), &keys);
+    save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
     Ok(())
 }
 
@@ -443,14 +678,8 @@ fn remove_api_key(provider: String, state: tauri::State<'_, AppState>, app: taur
 fn set_gemini_pro(enabled: bool, state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
     let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
     keys.use_gemini_pro = enabled;
-    save_keys_to_disk(&get_keys_file_path(&app), &keys);
+    save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
     Ok(())
-}
-
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
 #[tauri::command]
@@ -461,17 +690,7 @@ async fn explain_move(
     perspective: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key) = {
-        let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-        (
-            keys.gemini_api_key.clone().unwrap_or_default(),
-            keys.openai_api_key.clone().unwrap_or_default(),
-        )
-    };
-
-    // User keys take priority, fall back to environment variables
-    let gemini_key = if gemini_key.is_empty() { env::var("GEMINI_API_KEY").unwrap_or_default() } else { gemini_key };
-    let openai_key = if openai_key.is_empty() { env::var("OPENAI_API_KEY").unwrap_or_default() } else { openai_key };
+    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
 
     if gemini_key.is_empty() && openai_key.is_empty() {
         return Ok("No API key found. Click the key icon above to add your API key, or set the GEMINI_API_KEY environment variable for a free AI coach.".to_string());
@@ -484,8 +703,9 @@ async fn explain_move(
     );
 
     if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key).unwrap();
-        let agent = client.agent("gemini-3-flash-preview")
+        let client = gemini::Client::new(&gemini_key)
+            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
+        let agent = client.agent(gemini_model(use_pro))
             .preamble(&preamble)
             .build();
 
@@ -494,7 +714,8 @@ async fn explain_move(
             Err(e) => Err(format!("Gemini Coaching Error: {}", e))
         }
     } else {
-        let client = openai::Client::new(&openai_key).unwrap();
+        let client = openai::Client::new(&openai_key)
+            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
         let agent = client.agent(openai::GPT_4O)
             .preamble(&preamble)
             .build();
@@ -512,27 +733,30 @@ async fn explain_move(
 async fn explain_critical_moment(
     moment: CriticalMomentData,
     perspective: String,
+    session_log: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key) = resolve_api_keys(&state.api_keys)?;
+    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
 
     if gemini_key.is_empty() && openai_key.is_empty() {
         return Err("No API key configured.".to_string());
     }
 
-    let prompt = build_critical_moment_prompt(&moment, &perspective);
-    let preamble = "You are a grandmaster-level chess coach. Explain critical moments concisely, focusing on the tactical and strategic reasons behind evaluation swings.";
+    let prompt =
+        build_critical_moment_prompt(&moment, &perspective, session_log.as_deref());
 
     if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key).unwrap();
-        let agent = client.agent("gemini-3-flash-preview")
-            .preamble(preamble)
+        let client = gemini::Client::new(&gemini_key)
+            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
+        let agent = client.agent(gemini_model(use_pro))
+            .preamble(COACH_SYSTEM_PROMPT)
             .build();
         agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
     } else {
-        let client = openai::Client::new(&openai_key).unwrap();
+        let client = openai::Client::new(&openai_key)
+            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
         let agent = client.agent(openai::GPT_4O)
-            .preamble(preamble)
+            .preamble(COACH_SYSTEM_PROMPT)
             .build();
         agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
     }
@@ -547,7 +771,7 @@ async fn generate_thematic_summary(
     game_result: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key) = resolve_api_keys(&state.api_keys)?;
+    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
 
     if gemini_key.is_empty() && openai_key.is_empty() {
         return Err("No API key configured.".to_string());
@@ -555,18 +779,19 @@ async fn generate_thematic_summary(
 
     let result_str = game_result.as_deref().unwrap_or("unknown");
     let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false));
-    let preamble = "You are a chess coach writing a concise post-game summary. Focus on actionable patterns the player can improve.";
 
     if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key).unwrap();
-        let agent = client.agent("gemini-3-flash-preview")
-            .preamble(preamble)
+        let client = gemini::Client::new(&gemini_key)
+            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
+        let agent = client.agent(gemini_model(use_pro))
+            .preamble(COACH_SYSTEM_PROMPT)
             .build();
         agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
     } else {
-        let client = openai::Client::new(&openai_key).unwrap();
+        let client = openai::Client::new(&openai_key)
+            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
         let agent = client.agent(openai::GPT_4O)
-            .preamble(preamble)
+            .preamble(COACH_SYSTEM_PROMPT)
             .build();
         agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
     }
@@ -576,16 +801,17 @@ async fn generate_thematic_summary(
 
 #[tauri::command]
 fn save_report(report: SavedReport, app: tauri::AppHandle) -> Result<(), String> {
-    ensure_reports_dir(&app);
-    let path = get_reports_dir(&app).join(format!("{}.json", report.id));
+    validate_report_id(&report.id)?;
+    ensure_reports_dir(&app)?;
+    let path = get_reports_dir(&app)?.join(format!("{}.json", report.id));
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
-    ensure_reports_dir(&app);
-    let dir = get_reports_dir(&app);
+    ensure_reports_dir(&app)?;
+    let dir = get_reports_dir(&app)?;
     let mut reports: Vec<SavedReportMeta> = Vec::new();
 
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
@@ -615,6 +841,7 @@ fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
             opening_moves: report.opening_moves,
             critical_moment_count: report.report.critical_moments.len() as u32,
             result: report.result.clone(),
+            name: report.name.clone(),
         });
     }
 
@@ -624,21 +851,40 @@ fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
 
 #[tauri::command]
 fn load_report(id: String, app: tauri::AppHandle) -> Result<SavedReport, String> {
-    let path = get_reports_dir(&app).join(format!("{}.json", id));
+    validate_report_id(&id)?;
+    let path = get_reports_dir(&app)?.join(format!("{}.json", id));
     let contents = fs::read_to_string(&path).map_err(|e| format!("Report not found: {}", e))?;
     serde_json::from_str(&contents).map_err(|e| format!("Failed to parse report: {}", e))
 }
 
 #[tauri::command]
 fn delete_report(id: String, app: tauri::AppHandle) -> Result<(), String> {
-    let path = get_reports_dir(&app).join(format!("{}.json", id));
+    validate_report_id(&id)?;
+    let path = get_reports_dir(&app)?.join(format!("{}.json", id));
     fs::remove_file(&path).map_err(|e| format!("Failed to delete report: {}", e))
 }
 
 #[tauri::command]
+fn rename_report(id: String, name: String, app: tauri::AppHandle) -> Result<(), String> {
+    validate_report_id(&id)?;
+    let name = name.trim().to_string();
+    if name.chars().count() > 100 {
+        return Err("Name too long (max 100 characters)".to_string());
+    }
+    let path = get_reports_dir(&app)?.join(format!("{}.json", id));
+    let contents = fs::read_to_string(&path).map_err(|e| format!("Report not found: {}", e))?;
+    let mut report: SavedReport =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse report: {}", e))?;
+    // An empty name clears the custom name and falls back to the opening line.
+    report.name = if name.is_empty() { None } else { Some(name) };
+    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Option<SavedReportMeta>, String> {
-    ensure_reports_dir(&app);
-    let dir = get_reports_dir(&app);
+    ensure_reports_dir(&app)?;
+    let dir = get_reports_dir(&app)?;
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
 
     for entry in entries {
@@ -668,6 +914,7 @@ fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Optio
                 opening_moves: report.opening_moves,
                 critical_moment_count: report.report.critical_moments.len() as u32,
                 result: report.result.clone(),
+                name: report.name.clone(),
             }));
         }
     }
@@ -708,6 +955,14 @@ async fn run_engine_pass(
     multipv: u32,
     app: tauri::AppHandle,
 ) -> Result<Vec<engine::PositionEval>, String> {
+    // Bounds-check parameters — these commands are reachable from any JS in
+    // the webview, so don't trust them blindly.
+    if !(1..=30).contains(&depth) {
+        return Err(format!("Invalid depth {} (expected 1-30)", depth));
+    }
+    if !(1..=10).contains(&multipv) {
+        return Err(format!("Invalid MultiPV {} (expected 1-10)", multipv));
+    }
     let stockfish_path = engine::find_stockfish_path()?;
     let total = positions.len();
     let completed = Arc::new(AtomicUsize::new(0));
@@ -767,7 +1022,7 @@ fn set_engine_mode(mode: String, state: tauri::State<'_, AppState>, app: tauri::
         _ => lc0_config::EngineMode::StockfishOnly,
     };
     config.setup_complete = true;
-    lc0_config::save_config(&app, &config);
+    lc0_config::save_config(&app, &config)?;
     Ok(())
 }
 
@@ -787,7 +1042,7 @@ fn save_report_settings(
     config.detailed_report = detailed_report;
     config.use_lc0 = use_lc0;
     config.include_opportunities = include_opportunities;
-    lc0_config::save_config(&app, &config);
+    lc0_config::save_config(&app, &config)?;
     Ok(())
 }
 
@@ -814,6 +1069,9 @@ async fn run_lc0_pass(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<lc0_engine::Lc0Eval>, String> {
+    if !(1..=1_000_000).contains(&nodes) {
+        return Err(format!("Invalid node count {} (expected 1-1000000)", nodes));
+    }
     let (lc0_path, weights_path) = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         let lp = lc0_config::find_lc0_path(&config, &app)
@@ -826,16 +1084,49 @@ async fn run_lc0_pass(
     lc0_engine::run_lc0_pass(positions, nodes, &lc0_path, &weights_path, app).await
 }
 
+#[tauri::command]
+async fn run_lc0_policy_probe(
+    positions: Vec<String>,
+    nodes: u32,
+    top_n: Option<usize>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Vec<Vec<lc0_engine::Lc0PolicyMove>>, String> {
+    if !(1..=100_000).contains(&nodes) {
+        return Err(format!("Invalid node count {} (expected 1-100000)", nodes));
+    }
+    let (lc0_path, weights_path) = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        let lp = lc0_config::find_lc0_path(&config, &app)
+            .ok_or("Lc0 binary not found. Run setup first.")?;
+        let wp = lc0_config::find_weights_path(&config, &app)
+            .ok_or("Lc0 weights not found. Run setup first.")?;
+        (lp, wp)
+    };
+
+    lc0_engine::run_lc0_policy_probe(
+        positions,
+        nodes,
+        &lc0_path,
+        &weights_path,
+        app,
+        top_n.unwrap_or(3),
+    )
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Load persisted API keys
-            let keys_path = get_keys_file_path(&handle);
-            let keys = load_keys_from_disk(&keys_path);
+            // Load persisted API keys (fall back to defaults if the data
+            // directory is somehow unavailable)
+            let keys = get_keys_file_path(&handle)
+                .map(|p| load_keys_from_disk(&p))
+                .unwrap_or_default();
 
             // Load persisted app config
             let config = lc0_config::load_config(&handle);
@@ -852,7 +1143,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             explain_move,
             get_api_keys,
             save_api_key,
@@ -864,6 +1154,7 @@ pub fn run() {
             list_reports,
             load_report,
             delete_report,
+            rename_report,
             check_report_exists,
             run_engine_pass,
             live_engine_set_fen,
@@ -875,7 +1166,18 @@ pub fn run() {
             setup_lc0,
             check_lc0_ready,
             run_lc0_pass,
+            run_lc0_policy_probe,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            // Gracefully stop the persistent Stockfish process so it doesn't
+            // outlive the app (the child also has kill_on_drop as a backstop).
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.live_engine.shutdown();
+            }
+        }
+    });
 }

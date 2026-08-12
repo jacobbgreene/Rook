@@ -11,17 +11,12 @@ use tauri::{AppHandle, Emitter, Manager};
 // Config Types
 // ═══════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineMode {
+    #[default]
     StockfishOnly,
     Hybrid,
-}
-
-impl Default for EngineMode {
-    fn default() -> Self {
-        Self::StockfishOnly
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,24 +62,30 @@ impl Default for AppConfig {
 // Persistence
 // ═══════════════════════════════════════════════════════════════
 
-fn get_config_path(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap().join("config.json")
+fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("config.json"))
+        .map_err(|e| format!("Cannot resolve app data directory: {}", e))
 }
 
 pub fn load_config(app: &AppHandle) -> AppConfig {
-    let path = get_config_path(app);
+    let Ok(path) = get_config_path(app) else {
+        return AppConfig::default();
+    };
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save_config(app: &AppHandle, config: &AppConfig) {
-    let path = get_config_path(app);
+pub fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
+    let path = get_config_path(app)?;
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(&path, serde_json::to_string_pretty(config).unwrap_or_default());
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("Failed to save config: {}", e))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -143,7 +144,7 @@ pub fn find_lc0_path(config: &AppConfig, app: &AppHandle) -> Option<String> {
     let app_lc0 = app
         .path()
         .app_data_dir()
-        .unwrap()
+        .ok()?
         .join("lc0")
         .join(if cfg!(windows) { "lc0.exe" } else { "lc0" });
     if app_lc0.exists() {
@@ -165,7 +166,7 @@ pub fn find_weights_path(config: &AppConfig, app: &AppHandle) -> Option<String> 
     let app_weights = app
         .path()
         .app_data_dir()
-        .unwrap()
+        .ok()?
         .join("lc0")
         .join("weights.pb.gz");
     if app_weights.exists() {
@@ -309,9 +310,32 @@ fn resolve_lc0_binary(lc0_dir: &std::path::Path) -> Result<Option<PathBuf>, Stri
     Ok(None)
 }
 
+/// Verify a downloaded file against its expected SHA-256 hash.
+/// On mismatch the file is deleted so a corrupt/tampered artifact is
+/// never left behind for the engine loader to pick up.
+async fn verify_sha256(path: &std::path::Path, expected_hex: &str, label: &str) -> Result<(), String> {
+    use sha2::Digest;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("Failed to read {} for verification: {}", label, e))?;
+    let actual = hex::encode(sha2::Sha256::digest(&bytes));
+    if actual != expected_hex {
+        let _ = fs::remove_file(path);
+        return Err(format!(
+            "{} checksum mismatch (expected {}, got {}). The download may be corrupt — please retry.",
+            label, expected_hex, actual
+        ));
+    }
+    Ok(())
+}
+
 /// Download and configure Lc0 binary + neural network weights.
 pub async fn setup_lc0(app: AppHandle) -> Result<(), String> {
-    let lc0_dir = app.path().app_data_dir().unwrap().join("lc0");
+    let lc0_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data directory: {}", e))?
+        .join("lc0");
     let _ = fs::create_dir_all(&lc0_dir);
 
     // ── Resolve Lc0 binary ──────────────────────────────────────
@@ -372,8 +396,15 @@ pub async fn setup_lc0(app: AppHandle) -> Result<(), String> {
         // SE (Squeeze-and-Excitation) format is required for OpenCL
         // compatibility — the newer attention/transformer networks
         // (T1, T60+, BT3, BT4) are NOT supported by OpenCL.
-        let weights_url = "https://storage.lczero.org/files/networks/00af53b081e80147172e6f281c01daf5ca19ada173321438914c730370aa4267";
+        //
+        // lczero.org names network files by the SHA-256 of their contents,
+        // so the URL filename doubles as the expected checksum.
+        let weights_sha256 =
+            "00af53b081e80147172e6f281c01daf5ca19ada173321438914c730370aa4267";
+        let weights_url =
+            "https://storage.lczero.org/files/networks/00af53b081e80147172e6f281c01daf5ca19ada173321438914c730370aa4267";
         download_file(weights_url, &weights_path, &app, "weights").await?;
+        verify_sha256(&weights_path, weights_sha256, "Lc0 weights").await?;
     }
 
     // ── Verify ──────────────────────────────────────────────────
@@ -410,7 +441,7 @@ pub async fn setup_lc0(app: AppHandle) -> Result<(), String> {
     config.weights_path = weights_path.to_str().map(String::from);
     config.engine_mode = EngineMode::Hybrid;
     config.setup_complete = true;
-    save_config(&app, &config);
+    save_config(&app, &config)?;
 
     Ok(())
 }
@@ -441,7 +472,7 @@ fn extract_binary(
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n == binary_name)
+                .is_some_and(|n| n == binary_name)
             {
                 entry
                     .unpack(dest)
@@ -466,7 +497,7 @@ fn extract_binary(
                 || std::path::Path::new(&name)
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map_or(false, |n| n == binary_name)
+                    .is_some_and(|n| n == binary_name)
             {
                 let mut out = fs::File::create(dest)
                     .map_err(|e| format!("Failed to create binary file: {}", e))?;
@@ -486,16 +517,17 @@ fn extract_binary(
         }
 
         // Look in subdirectories
-        for entry in fs::read_dir(parent).map_err(|e| format!("Read dir error: {}", e))? {
-            if let Ok(entry) = entry {
-                let p = entry.path();
-                if p.is_dir() {
-                    let candidate = p.join(binary_name);
-                    if candidate.exists() {
-                        fs::rename(&candidate, dest)
-                            .map_err(|e| format!("Failed to move binary: {}", e))?;
-                        return Ok(());
-                    }
+        for entry in fs::read_dir(parent)
+            .map_err(|e| format!("Read dir error: {}", e))?
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.is_dir() {
+                let candidate = p.join(binary_name);
+                if candidate.exists() {
+                    fs::rename(&candidate, dest)
+                        .map_err(|e| format!("Failed to move binary: {}", e))?;
+                    return Ok(());
                 }
             }
         }
