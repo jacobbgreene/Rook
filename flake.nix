@@ -13,10 +13,10 @@
     in
     {
       devShells.${system}.default = pkgs.mkShell {
+        # rustc/cargo come from the system config (rust-overlay), not pinned
+        # here, so rust-analyzer always matches rustc. Only Node + libs here.
         nativeBuildInputs = with pkgs; [
           pkg-config
-          cargo
-          rustc
           nodejs
         ];
 
