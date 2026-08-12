@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { PopIn } from "./animate";
 
 interface SetupWizardProps {
   onComplete: () => void;
@@ -91,7 +92,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   if (downloading) {
     return (
       <div className="setup-wizard-overlay">
-        <div className="setup-wizard">
+        <PopIn className="setup-wizard">
           <h2 className="setup-wizard-title">Setting up Lc0...</h2>
 
           <div className="download-stage-label">{stageLabel(progress.stage)}</div>
@@ -129,14 +130,14 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           >
             Cancel — use Standard mode instead
           </button>
-        </div>
+        </PopIn>
       </div>
     );
   }
 
   return (
     <div className="setup-wizard-overlay">
-      <div className="setup-wizard">
+      <PopIn className="setup-wizard">
         <h2 className="setup-wizard-title">Welcome to Rook</h2>
         <p className="setup-wizard-subtitle">Choose your analysis experience:</p>
 
@@ -179,7 +180,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
         >
           Continue
         </button>
-      </div>
+      </PopIn>
     </div>
   );
 }

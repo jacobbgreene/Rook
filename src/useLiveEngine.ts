@@ -35,7 +35,6 @@ export function useLiveEngine() {
     Record<number, EngineThought>
   >({});
   const [evaluation, setEvaluation] = useState("");
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const currentFenRef = useRef("");
   const evalDepthRef = useRef(0);
@@ -131,6 +130,10 @@ export function useLiveEngine() {
   }, []);
 
   // ── New game (flushes hash tables) ──────────────────────────
+  // Returns the invoke promise so callers can await it — awaiting guarantees
+  // the ucinewgame command lands in the engine's channel BEFORE any
+  // subsequent set_fen (otherwise the two commands race and the freshly
+  // started search can be torn down by a late NewGame).
   const newGame = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     pendingThoughts.current = {};
@@ -143,7 +146,7 @@ export function useLiveEngine() {
     setEvaluation("");
     currentFenRef.current = "";
     evalDepthRef.current = 0;
-    invoke("live_engine_new_game").catch(() => {});
+    return invoke("live_engine_new_game").catch(() => {});
   }, []);
 
   // ── Event listeners ─────────────────────────────────────────
@@ -196,12 +199,7 @@ export function useLiveEngine() {
         "engine-status",
         (event) => {
           if (!mounted) return;
-          const { status } = event.payload;
-          if (status === "searching") {
-            setIsAnalyzing(true);
-          } else if (status === "stopped" || status === "ready" || status === "error") {
-            setIsAnalyzing(false);
-          } else if (status === "phase2") {
+          if (event.payload.status === "phase2") {
             // Clear thoughts for fresh widen pass
             pendingThoughts.current = {};
             setEngineThoughts({});
@@ -246,7 +244,6 @@ export function useLiveEngine() {
       evalDepthRef.current = 99;
       setEvaluation(eval_);
       setEngineThoughts(thoughts);
-      setIsAnalyzing(false);
     },
     [],
   );
@@ -254,7 +251,6 @@ export function useLiveEngine() {
   return {
     engineThoughts,
     evaluation,
-    isAnalyzing,
     startAnalysis,
     stopAnalysis,
     newGame,

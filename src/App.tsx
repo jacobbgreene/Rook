@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Chess } from "chess.js";
-import { Chessboard } from "react-chessboard";
 import { invoke } from "@tauri-apps/api/core";
 import {
   runFullAnalysis,
@@ -10,15 +9,34 @@ import {
   SavedReportMeta,
   computeGameHash,
   determineGameResult,
+  moveInfoAt,
+  uciToSan,
   PositionEval,
 } from "./gameAnalysis";
 import { useLiveEngine } from "./useLiveEngine";
 import { SetupWizard } from "./SetupWizard";
 import ReactMarkdown from "react-markdown";
+import { stripLatex } from "./utils";
+import {
+  CoachIcon,
+  ReportIcon,
+  SettingsIcon,
+  HelpIcon,
+} from "./icons";
+import { BoardSection } from "./components/BoardSection";
+import { MovesPanel } from "./components/MovesPanel";
+import { ImportModal } from "./components/ImportModal";
+import {
+  SettingsModal,
+  type ApiKeyStatus,
+  type AppConfig,
+  type ReportSettings,
+} from "./components/SettingsModal";
+import { ReportSetupModal } from "./components/ReportSetupModal";
+import { SavedReportsModal } from "./components/SavedReportsModal";
+import { ShortcutsModal } from "./components/ShortcutsModal";
+import { ReportView } from "./components/ReportView";
 import "./App.css";
-
-/** Strip LaTeX $...$ delimiters that LLMs wrap around chess notation. */
-const stripLatex = (text: string) => text.replace(/\$([^$]+)\$/g, "$1");
 
 interface Arrow {
   startSquare: string;
@@ -26,197 +44,6 @@ interface Arrow {
   color: string;
 }
 
-interface ApiKeyStatus {
-  gemini_set: boolean;
-  gemini_hint: string;
-  openai_set: boolean;
-  openai_hint: string;
-  gemini_pro_enabled: boolean;
-}
-
-interface AppConfig {
-  engineMode: "stockfish_only" | "hybrid";
-  lc0Path: string | null;
-  weightsPath: string | null;
-  setupComplete: boolean;
-  analysisDepth: number;
-  includeGreatMoves: boolean;
-  detailedReport: boolean;
-  useLc0: boolean;
-  includeOpportunities: boolean;
-}
-
-const SkipBackIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M19 20L9 12l10-8V20z" />
-    <line x1="5" y1="4" x2="5" y2="20" />
-  </svg>
-);
-const BackIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M19 12H5M12 19l-7-7 7-7" />
-  </svg>
-);
-const ForwardIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M5 12h14M12 5l7 7-7 7" />
-  </svg>
-);
-const SkipForwardIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M5 4l10 8-10 8V4z" />
-    <line x1="19" y1="4" x2="19" y2="20" />
-  </svg>
-);
-const FlipIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <polyline points="17 1 21 5 17 9"></polyline>
-    <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-    <polyline points="7 23 3 19 7 15"></polyline>
-    <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-  </svg>
-);
-const ResetIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-    <path d="M3 3v5h5" />
-  </svg>
-);
-const CoachIcon = () => (
-  <svg
-    width="20"
-    height="20"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M12 2a10 10 0 1 0 10 10H12V2z" />
-    <path d="M12 12L2.1 10.05" />
-    <path d="M12 12l1.21-9.81" />
-    <path d="M12 12l8.76-4.81" />
-    <path d="M12 12l5.88 8.09" />
-    <path d="M12 12l-9.46 3.25" />
-  </svg>
-);
-const ReportIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-    <polyline points="14 2 14 8 20 8" />
-    <line x1="16" y1="13" x2="8" y2="13" />
-    <line x1="16" y1="17" x2="8" y2="17" />
-    <polyline points="10 9 9 9 8 9" />
-  </svg>
-);
-const KeyIcon = () => (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-  </svg>
-);
-const EyeIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-    <circle cx="12" cy="12" r="3" />
-  </svg>
-);
-const EyeOffIcon = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-    <line x1="1" y1="1" x2="23" y2="23" />
-  </svg>
-);
 function App() {
   const [game, setGame] = useState(new Chess());
   const [gameHistory, setGameHistory] = useState<string[]>([new Chess().fen()]);
@@ -236,17 +63,16 @@ function App() {
   } = useLiveEngine();
   const [coachMessage, setCoachMessage] = useState("");
   const [isCoachLoading, setIsCoachLoading] = useState(false);
+  // The Explorer tab (engine lines) is the default view.
   const [activeTab, setActiveTab] = useState<
     "strategize" | "analysis" | "report"
-  >("strategize");
+  >("analysis");
 
-  // API Key management state
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  // Modal visibility
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showHelpModal, setShowHelpModal] = useState(false);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus | null>(null);
-  const [geminiKeyInput, setGeminiKeyInput] = useState("");
-  const [openaiKeyInput, setOpenaiKeyInput] = useState("");
-  const [showGeminiKey, setShowGeminiKey] = useState(false);
-  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
 
   // Post-game report state
   const [postGameReport, setPostGameReport] =
@@ -261,9 +87,6 @@ function App() {
   const [includeGreatMoves, setIncludeGreatMoves] = useState(false);
   const [analysisDepth, setAnalysisDepth] = useState<number>(12);
   const [mainLineHistory, setMainLineHistory] = useState<string[] | null>(null);
-  const [_reportEvaluations, _setReportEvaluations] = useState<
-    PositionEval[] | null
-  >(null);
   const [useLc0, setUseLc0] = useState(false);
   const [detailedReport, setDetailedReport] = useState(true);
   const [includeOpportunities, setIncludeOpportunities] = useState(false);
@@ -276,7 +99,7 @@ function App() {
   const mainLineRef = useRef<string[] | null>(null);
   const mainLineSansRef = useRef<string[] | null>(null);
   const mainLineIndexRef = useRef<Map<string, number> | null>(null);
-  const activeTabRef = useRef<string>("strategize");
+  const activeTabRef = useRef<string>("analysis");
   const variationEvalsRef = useRef(
     new Map<
       string,
@@ -288,9 +111,12 @@ function App() {
   );
   const variationReturnIdxRef = useRef<number | null>(null);
 
+  // Bumped whenever a report run starts or is dismissed, so a stale async
+  // analysis can't write its results into a newer/closed report session.
+  const reportGenRef = useRef(0);
+
   const setReportEvaluations = (v: PositionEval[] | null) => {
     reportEvalsRef.current = v;
-    _setReportEvaluations(v);
   };
   const setMainLineHistoryTracked = (v: string[] | null, sans?: string[] | null) => {
     mainLineRef.current = v;
@@ -331,13 +157,9 @@ function App() {
     }
   };
 
-  const handleSaveKey = async (provider: string) => {
-    const key = provider === "gemini" ? geminiKeyInput : openaiKeyInput;
-    if (!key.trim()) return;
+  const handleSaveKey = async (provider: string, key: string) => {
     try {
-      await invoke("save_api_key", { provider, key: key.trim() });
-      if (provider === "gemini") setGeminiKeyInput("");
-      else setOpenaiKeyInput("");
+      await invoke("save_api_key", { provider, key });
       await loadApiKeys();
     } catch (e) {
       console.error("Failed to save key:", e);
@@ -363,6 +185,44 @@ function App() {
     }
   };
 
+  const handleToggleEngineMode = async () => {
+    try {
+      if (appConfig?.engineMode === "hybrid") {
+        await invoke("set_engine_mode", { mode: "stockfish_only" });
+      } else {
+        await invoke("set_engine_mode", { mode: "hybrid" });
+      }
+      const config = await invoke<AppConfig>("get_app_config");
+      setAppConfig(config);
+    } catch (e) {
+      console.error("Failed to switch engine mode:", e);
+    }
+  };
+
+  const reportSettings: ReportSettings = {
+    analysisDepth,
+    includeGreatMoves,
+    detailedReport,
+    useLc0,
+    includeOpportunities,
+  };
+
+  // Apply + persist report settings (shared by Settings and Report Setup).
+  const updateReportSettings = (s: ReportSettings) => {
+    setAnalysisDepth(s.analysisDepth);
+    setIncludeGreatMoves(s.includeGreatMoves);
+    setDetailedReport(s.detailedReport);
+    setUseLc0(s.useLc0);
+    setIncludeOpportunities(s.includeOpportunities);
+    invoke("save_report_settings", {
+      analysisDepth: s.analysisDepth,
+      includeGreatMoves: s.includeGreatMoves,
+      detailedReport: s.detailedReport,
+      useLc0: s.useLc0,
+      includeOpportunities: s.includeOpportunities,
+    }).catch(() => {});
+  };
+
   useEffect(() => {
     loadApiKeys();
     invoke<AppConfig>("get_app_config")
@@ -378,15 +238,6 @@ function App() {
       })
       .catch(() => setConfigLoaded(true));
   }, []);
-
-  useEffect(() => {
-    if (activeTab === "report") {
-      const el = document.querySelector('[data-report-active="true"]');
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    }
-  }, [currentMoveIndex, activeTab]);
 
   // Auto-detect saved report for current game
   useEffect(() => {
@@ -419,28 +270,11 @@ function App() {
 
     for (let i = 0; i < ev.topLines.length; i++) {
       const line = ev.topLines[i];
-      // Convert UCI PV to SAN
-      const g = new Chess(fen);
-      const sanMoves: string[] = [];
-      for (const uci of line.pv) {
-        if (uci.length < 4) break;
-        try {
-          const r = g.move({
-            from: uci.slice(0, 2),
-            to: uci.slice(2, 4),
-            promotion: uci.length >= 5 ? uci[4] : undefined,
-          });
-          if (r) sanMoves.push(r.san);
-          else break;
-        } catch {
-          break;
-        }
-      }
       thoughts[i + 1] = {
         multipv: i + 1,
-        depth: 15, // report analysis depth
+        depth: analysisDepth, // nominal — reflects the configured report depth
         score: formatSc(line),
-        moves: sanMoves,
+        moves: uciToSan(fen, line.pv),
         rawMoves: line.pv,
         rawFirstMove: line.pv[0] || "",
       };
@@ -547,73 +381,121 @@ function App() {
     return sanMoves;
   };
 
-  const buildPgn = (sanMoves: string[]): string => {
+  const buildPgn = (sanMoves: string[], startFen?: string): string => {
+    // Derive the starting side/fullmove from the initial position so games
+    // imported from a custom FEN are numbered correctly.
+    let startMove = 1;
+    let blackFirst = false;
+    if (startFen) {
+      const parts = startFen.split(" ");
+      startMove = parseInt(parts[5], 10) || 1;
+      blackFirst = parts[1] === "b";
+    }
     let pgn = "";
     for (let i = 0; i < sanMoves.length; i++) {
-      if (i % 2 === 0) {
-        pgn += `${Math.floor(i / 2) + 1}. `;
+      const plyOffset = blackFirst ? i + 1 : i;
+      if (plyOffset % 2 === 0) {
+        pgn += `${startMove + Math.floor(plyOffset / 2)}. `;
+      } else if (i === 0) {
+        pgn += `${startMove}... `;
       }
       pgn += sanMoves[i] + " ";
     }
     return pgn.trim();
   };
 
-  const requestPostGameReport = async () => {
+  // Runs the full analysis pipeline.  By default it analyses the current
+  // game; pass `override` to regenerate a previously saved report.
+  const requestPostGameReport = async (override?: {
+    history: string[];
+    sanList: string[];
+    perspective: "white" | "black";
+    pgnResult?: string;
+  }) => {
     if (isPostGameLoading) return;
+    // If a report is active, the board may be showing a variation — always
+    // analyse the recorded main line, not whatever line is on screen.
+    const history =
+      override?.history ?? mainLineRef.current ?? gameHistory;
+    const sanList =
+      override?.sanList ?? mainLineSansRef.current ?? gameSanList;
+    const perspective = override?.perspective ?? reportPerspective;
+    const pgnRes = override?.pgnResult ?? pgnResult;
+
+    const gen = ++reportGenRef.current;
     setIsPostGameLoading(true);
     setActiveTabTracked("report");
     setPostGameReport(null);
     setReportEvaluations(null);
     setSavedReportId(null);
-    setMainLineHistoryTracked([...gameHistory], [...gameSanList]);
-    setBoardOrientation(reportPerspective);
+    setMainLineHistoryTracked([...history], [...sanList]);
+    if (override) {
+      // Regenerating a saved report — load its game onto the board.
+      setGameHistory(history);
+      setGameSanList(sanList);
+      setReportPerspective(perspective);
+      setPgnResult(pgnRes);
+    }
+    setBoardOrientation(perspective);
     setAnalysisProgress({
       phase: "engine",
       current: 0,
-      total: gameHistory.length,
+      total: history.length,
     });
 
     try {
       const { report, evaluations } = await runFullAnalysis(
-        gameHistory,
-        reportPerspective,
-        (phase) => setAnalysisProgress(phase),
+        history,
+        perspective,
+        (phase) => {
+          // Ignore progress from a superseded/closed report run
+          if (gen === reportGenRef.current) setAnalysisProgress(phase);
+        },
         analysisDepth,
         includeGreatMoves,
         useLc0,
         detailedReport,
         includeOpportunities,
+        pgnRes,
       );
+      // The report was closed or re-started while analysing — discard.
+      if (gen !== reportGenRef.current) return;
       setPostGameReport(report);
       setReportEvaluations(evaluations);
-      setCurrentMoveIndex(1);
-      setGame(new Chess(gameHistory[1]));
-      handlePositionChange(gameHistory[1]);
+      if (history.length > 1) {
+        setCurrentMoveIndex(1);
+        setGame(new Chess(history[1]));
+        handlePositionChange(history[1]);
+      }
 
-      // Auto-save the report
-      const gameHash = computeGameHash(gameHistory);
-      const sanMoves = gameSanList;
+      // Auto-save the report. Replace any previously saved report for this
+      // same game instead of accumulating duplicates in the library.
+      const gameHash = computeGameHash(history);
+      const existing = await invoke<SavedReportMeta | null>(
+        "check_report_exists",
+        { gameHash },
+      ).catch(() => null);
+      if (existing) {
+        await invoke("delete_report", { id: existing.id }).catch(() => {});
+      }
       const openingMoves = buildPgn(
-        sanMoves.slice(0, Math.min(sanMoves.length, 6)),
+        sanList.slice(0, Math.min(sanList.length, 6)),
+        history[0],
       );
-      const result = determineGameResult(
-        gameHistory,
-        reportPerspective,
-        pgnResult,
-      );
+      const result = determineGameResult(history, perspective, pgnRes);
       const id = `rpt_${Date.now()}`;
       const savedReport: SavedReport = {
         id,
         gameHash,
         createdAt: new Date().toISOString(),
-        perspective: reportPerspective,
-        moveCount: sanMoves.length,
+        perspective,
+        moveCount: sanList.length,
         openingMoves,
         result,
         report,
-        gameHistory: [...gameHistory],
+        gameHistory: [...history],
         evaluations,
-        gameSanList: [...gameSanList],
+        gameSanList: [...sanList],
       };
       await invoke("save_report", { report: savedReport });
       setSavedReportId(id);
@@ -621,20 +503,24 @@ function App() {
         id,
         gameHash,
         createdAt: savedReport.createdAt,
-        perspective: reportPerspective,
-        moveCount: sanMoves.length,
+        perspective,
+        moveCount: sanList.length,
         openingMoves,
         criticalMomentCount: report.criticalMoments.length,
         result,
       });
     } catch (error) {
-      setPostGameReport({
-        criticalMoments: [],
-        thematicSummary: `Analysis failed: ${error}`,
-      });
+      if (gen === reportGenRef.current) {
+        setPostGameReport({
+          criticalMoments: [],
+          thematicSummary: `Analysis failed: ${error}`,
+        });
+      }
     } finally {
-      setIsPostGameLoading(false);
-      setAnalysisProgress(null);
+      if (gen === reportGenRef.current) {
+        setIsPostGameLoading(false);
+        setAnalysisProgress(null);
+      }
     }
   };
 
@@ -694,55 +580,41 @@ function App() {
     return move;
   }
 
+  const navigateToMove = (historyIndex: number) => {
+    if (historyIndex < 0 || historyIndex >= gameHistory.length) return;
+    handlePositionChange(gameHistory[historyIndex]);
+    setCurrentMoveIndex(historyIndex);
+    setGame(new Chess(gameHistory[historyIndex]));
+  };
+
   const moveBack = () => {
-    if (currentMoveIndex > 0) {
-      const newIndex = currentMoveIndex - 1;
-      handlePositionChange(gameHistory[newIndex]);
-      setCurrentMoveIndex(newIndex);
-      setGame(new Chess(gameHistory[newIndex]));
-    }
+    if (currentMoveIndex > 0) navigateToMove(currentMoveIndex - 1);
   };
 
   const moveForward = () => {
-    if (currentMoveIndex < gameHistory.length - 1) {
-      const newIndex = currentMoveIndex + 1;
-      handlePositionChange(gameHistory[newIndex]);
-      setCurrentMoveIndex(newIndex);
-      setGame(new Chess(gameHistory[newIndex]));
-    }
+    if (currentMoveIndex < gameHistory.length - 1)
+      navigateToMove(currentMoveIndex + 1);
   };
 
   const moveToStart = () => {
-    if (currentMoveIndex > 0) {
-      handlePositionChange(gameHistory[0]);
-      setCurrentMoveIndex(0);
-      setGame(new Chess(gameHistory[0]));
-    }
+    if (currentMoveIndex > 0) navigateToMove(0);
   };
 
   const moveToEnd = () => {
-    const lastIndex = gameHistory.length - 1;
-    if (currentMoveIndex < lastIndex) {
-      handlePositionChange(gameHistory[lastIndex]);
-      setCurrentMoveIndex(lastIndex);
-      setGame(new Chess(gameHistory[lastIndex]));
-    }
+    if (currentMoveIndex < gameHistory.length - 1)
+      navigateToMove(gameHistory.length - 1);
   };
 
   const flipBoard = () => {
     setBoardOrientation((prev) => (prev === "white" ? "black" : "white"));
   };
 
-  const resetBoard = () => {
+  const resetBoard = async () => {
     const newGame = new Chess();
-    resetEngine();
-    handlePositionChange(newGame.fen());
-    setGame(newGame);
-    setGameHistory([newGame.fen()]);
-    setGameSanList([]);
-    setCurrentMoveIndex(0);
-    setBoardOrientation("white");
-    setActiveTabTracked("strategize");
+    // Clear report state first — the tracked setters update their refs
+    // synchronously, so handlePositionChange below can't pick up stale
+    // report evals for the fresh position.
+    setActiveTabTracked("analysis");
     setPostGameReport(null);
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
@@ -751,23 +623,30 @@ function App() {
     setSavedReportMeta(null);
     variationEvalsRef.current.clear();
     variationReturnIdxRef.current = null;
+    setGame(newGame);
+    setGameHistory([newGame.fen()]);
+    setGameSanList([]);
+    setCurrentMoveIndex(0);
+    setBoardOrientation("white");
+    // Await the engine reset so ucinewgame lands before the next set_fen.
+    await resetEngine();
+    handlePositionChange(newGame.fen());
   };
 
-  const [importInput, setImportInput] = useState("");
-  const [importError, setImportError] = useState("");
-
-  const handleImport = () => {
-    setImportError("");
+  // Import handler for the ImportModal — parses FEN or PGN, applies it,
+  // and returns feedback text to display inside the modal.
+  const handleImportInput = async (
+    input: string,
+  ): Promise<{ ok: boolean; text: string } | null> => {
     const newGame = new Chess();
-    const input = importInput.trim();
-
-    if (!input) return;
+    const trimmed = input.trim();
+    if (!trimmed) return null;
 
     let loaded = false;
     let isPgn = false;
 
     try {
-      newGame.load(input);
+      newGame.load(trimmed);
       loaded = true;
     } catch (e) {
       // Not a valid FEN, ignore and try PGN
@@ -775,7 +654,7 @@ function App() {
 
     if (!loaded) {
       try {
-        newGame.loadPgn(input);
+        newGame.loadPgn(trimmed);
         loaded = true;
         isPgn = true;
       } catch (e) {
@@ -784,18 +663,22 @@ function App() {
     }
 
     if (!loaded) {
-      setImportError("Invalid FEN or PGN format");
-      return;
+      return { ok: false, text: "Invalid FEN or PGN format" };
     }
 
+    let feedbackText: string;
     if (isPgn) {
       // Extract PGN Result header (e.g. "1-0", "0-1", "1/2-1/2")
       const headers = newGame.header();
       setPgnResult(headers.Result || undefined);
 
-      // Reconstruct the full timeline history if a PGN was imported
+      // Reconstruct the full timeline history if a PGN was imported.
+      // Respect SetUp/FEN headers: games starting from a custom position
+      // must be replayed from that position, not the standard startpos.
+      const startFen =
+        headers.SetUp === "1" && headers.FEN ? headers.FEN : undefined;
       const moves = newGame.history();
-      const tempGame = new Chess();
+      const tempGame = startFen ? new Chess(startFen) : new Chess();
       const fens = [tempGame.fen()];
 
       for (const move of moves) {
@@ -806,25 +689,31 @@ function App() {
       setGameHistory(fens);
       setGameSanList(moves);
       setCurrentMoveIndex(fens.length - 1);
+      feedbackText = `Game imported — ${moves.length} move${moves.length === 1 ? "" : "s"}`;
     } else {
       // It was a single FEN position
       setPgnResult(undefined);
       setGameHistory([newGame.fen()]);
       setGameSanList([]);
       setCurrentMoveIndex(0);
+      feedbackText = `Position imported — ${newGame.turn() === "w" ? "White" : "Black"} to move`;
     }
 
-    resetEngine();
-    handlePositionChange(newGame.fen());
-    setGame(newGame);
-    setImportInput("");
-    setActiveTabTracked("strategize");
+    // Clear report state FIRST (the tracked setters update their refs
+    // synchronously), so handlePositionChange can't inject stale report
+    // evals for the imported position.
+    setActiveTabTracked("analysis");
     setPostGameReport(null);
     setMainLineHistoryTracked(null);
     setReportEvaluations(null);
     setShowReportSetup(false);
     setSavedReportId(null);
     setSavedReportMeta(null);
+    // Await the engine reset so ucinewgame lands before the next set_fen.
+    await resetEngine();
+    handlePositionChange(newGame.fen());
+    setGame(newGame);
+    return { ok: true, text: feedbackText };
   };
 
   const playLineToMove = (uciMoves: string[], targetIndex: number) => {
@@ -874,7 +763,11 @@ function App() {
     sanMoves: string[],
     targetIndex: number,
   ) => {
-    variationReturnIdxRef.current = currentMoveIndex;
+    // Only record the return point when entering from the main line — a
+    // second hop while already inside a variation must not overwrite it.
+    if (!isExploringVariation) {
+      variationReturnIdxRef.current = currentMoveIndex;
+    }
 
     const historyIndex = gameHistory.indexOf(fen);
     const baseHistory =
@@ -904,7 +797,10 @@ function App() {
       }
     }
 
-    // Precompute evals for variation positions from the source PV
+    // Precompute evals for variation positions from the source PV.
+    // Only valid when the variation actually FOLLOWS the engine's PV — for
+    // trap lines (bait → refutation) it diverges, so we skip precomputation
+    // and let the live engine analyse those positions instead.
     variationEvalsRef.current = new Map();
     const srcEvals = reportEvalsRef.current;
     const srcIndex = mainLineIndexRef.current;
@@ -912,7 +808,10 @@ function App() {
       const srcIdx = srcIndex.get(fen) ?? -1;
       if (srcIdx >= 0 && srcEvals[srcIdx]) {
         const topLine = srcEvals[srcIdx].topLines[0];
-        if (topLine) {
+        const lineFollowsPv =
+          !!topLine?.pv.length &&
+          uciToSan(fen, [topLine.pv[0]])[0] === sanMoves[0];
+        if (topLine && lineFollowsPv) {
           const walker = new Chess(fen);
           for (let d = 0; d < sanMoves.length; d++) {
             try {
@@ -921,13 +820,25 @@ function App() {
               break;
             }
             const posFen = walker.fen();
+            const p = d + 1; // plies played from the root position
             const signedCp =
               topLine.scoreCp !== null
-                ? (d % 2 === 0 ? -topLine.scoreCp : topLine.scoreCp)
+                ? (p % 2 === 1 ? -topLine.scoreCp : topLine.scoreCp)
                 : null;
+            // Mate distance shrinks as the forced line plays out: UCI
+            // "mate N" means mate in 2N-1 plies, so after p plies the
+            // remaining distance is floor((2N - p) / 2).
             const signedMate =
               topLine.scoreMate !== null
-                ? (d % 2 === 0 ? -topLine.scoreMate : topLine.scoreMate)
+                ? (() => {
+                    const n = topLine.scoreMate!;
+                    const mag = Math.max(
+                      1,
+                      Math.floor((2 * Math.abs(n) - p) / 2),
+                    );
+                    const signed = Math.sign(n) * mag;
+                    return p % 2 === 1 ? -signed : signed;
+                  })()
                 : null;
             const score =
               signedMate !== null
@@ -960,7 +871,7 @@ function App() {
               thoughts: {
                 1: {
                   multipv: 1,
-                  depth: 15,
+                  depth: analysisDepth,
                   score,
                   moves: pvSan,
                   rawMoves: pvUci,
@@ -1030,57 +941,6 @@ function App() {
     .sort((a, b) => a.multipv - b.multipv)
     .slice(0, 3);
 
-  const getEvalInfo = () => {
-    if (!evaluation || currentMoveIndex === 0)
-      return { percent: 50, label: "", labelColor: "#fff" };
-    const isBlackTurn = game.turn() === "b";
-    let evalFromWhite: number;
-    let isMate = false;
-    let mateNum = 0;
-
-    // Checkmate: determine winner from the board state directly, since the
-    // evaluation string may be stale from the previous position.
-    if (game.isCheckmate()) {
-      isMate = true;
-      mateNum = 0;
-      // Side to move is the loser
-      const whiteWon = isBlackTurn;
-      evalFromWhite = whiteWon ? Infinity : -Infinity;
-    } else if (evaluation.startsWith("M")) {
-      isMate = true;
-      mateNum = parseInt(evaluation.slice(1));
-      const whiteMating = isBlackTurn ? mateNum < 0 : mateNum > 0;
-      evalFromWhite = whiteMating ? Infinity : -Infinity;
-    } else {
-      const raw = parseFloat(evaluation);
-      evalFromWhite = isBlackTurn ? -raw : raw;
-    }
-
-    const whitePercent =
-      50 + 50 * (2 / (1 + Math.exp(-evalFromWhite * 0.3)) - 1);
-    // Bar always shows white's absolute advantage — white-colored portion
-    // grows when white is winning, shrinks when black is winning.
-    const percent = whitePercent;
-    const perspectiveEval =
-      boardOrientation === "white" ? evalFromWhite : -evalFromWhite;
-
-    let label: string;
-    if (isMate) {
-      const perspectiveMatePositive = perspectiveEval > 0;
-      label = perspectiveMatePositive
-        ? `M${Math.abs(mateNum)}`
-        : `-M${Math.abs(mateNum)}`;
-    } else {
-      const sign = perspectiveEval > 0 ? "+" : "";
-      label = `${sign}${perspectiveEval.toFixed(2)}`;
-    }
-
-    const labelColor = percent > 55 ? "#333" : percent < 45 ? "#eee" : "#fff";
-    return { percent, label, labelColor };
-  };
-
-  const evalInfo = getEvalInfo();
-
   const getLineStyle = (multipv: number | "red") => {
     switch (multipv) {
       case 1:
@@ -1116,8 +976,6 @@ function App() {
     }
   };
 
-  const gameSanMoves = gameSanList;
-
   const mainLineSanMoves = useMemo(() => {
     if (!mainLineHistory) return null;
     // Use pre-cached SANs if available (avoids O(n²) reconstruction)
@@ -1141,9 +999,10 @@ function App() {
 
       let color = "rgba(255, 255, 100, 0.4)"; // default yellow
       if (postGameReport && activeTab === "report") {
-        const moveNum = Math.floor((currentMoveIndex - 1) / 2) + 1;
-        const side: "white" | "black" =
-          (currentMoveIndex - 1) % 2 === 0 ? "white" : "black";
+        const { moveNumber: moveNum, side } = moveInfoAt(
+          gameHistory,
+          currentMoveIndex - 1,
+        );
         const moment = postGameReport.criticalMoments.find(
           (m) => m.moveNumber === moveNum && m.side === side,
         );
@@ -1162,14 +1021,20 @@ function App() {
               color = "rgba(80, 180, 255, 0.4)";
               break;
             case "great_move":
+            case "capitalized":
               color = "rgba(74, 222, 128, 0.45)";
               break;
-            case "critical":
             case "brilliant":
+              color = "rgba(251, 191, 36, 0.45)";
+              break;
+            case "trap":
+              color = "rgba(244, 114, 182, 0.4)";
+              break;
+            case "critical":
               color = "rgba(34, 211, 238, 0.45)";
               break;
             case "opportunity":
-              color = "rgba(167, 139, 250, 0.4)";
+              color = "rgba(196, 181, 253, 0.4)";
               break;
             case "golden_opportunity":
               color = "rgba(244, 114, 182, 0.4)";
@@ -1253,8 +1118,7 @@ function App() {
           currentMoveIndex > 0
         ) {
           const i = currentMoveIndex - 1;
-          const moveNum = Math.floor(i / 2) + 1;
-          const side: "white" | "black" = i % 2 === 0 ? "white" : "black";
+          const { moveNumber: moveNum, side } = moveInfoAt(gameHistory, i);
           const moment = postGameReport.criticalMoments.find(
             (m) =>
               m.moveNumber === moveNum &&
@@ -1313,6 +1177,40 @@ function App() {
     }
   };
 
+  // Regenerate a saved report with the current analysis settings.
+  const regenerateReport = async (id: string) => {
+    try {
+      const saved = await invoke<SavedReport>("load_report", { id });
+      const sans =
+        saved.gameSanList &&
+        saved.gameSanList.length === saved.gameHistory.length - 1
+          ? saved.gameSanList
+          : reconstructSansFromHistory(saved.gameHistory);
+      setShowSavedReportsModal(false);
+      // Map the stored result back to a PGN-style result for the summary
+      const pgnResult =
+        saved.result === "win"
+          ? saved.perspective === "white"
+            ? "1-0"
+            : "0-1"
+          : saved.result === "loss"
+            ? saved.perspective === "white"
+              ? "0-1"
+              : "1-0"
+            : saved.result === "draw"
+              ? "1/2-1/2"
+              : undefined;
+      await requestPostGameReport({
+        history: saved.gameHistory,
+        sanList: sans,
+        perspective: saved.perspective,
+        pgnResult,
+      });
+    } catch (e) {
+      console.error("Failed to regenerate report:", e);
+    }
+  };
+
   const handleDeleteReport = async (id: string) => {
     try {
       await invoke("delete_report", { id });
@@ -1328,6 +1226,21 @@ function App() {
     }
   };
 
+  const handleRenameReport = async (id: string, name: string) => {
+    try {
+      await invoke("rename_report", { id, name });
+      const newName = name.trim() || null;
+      setSavedReportsList((prev) =>
+        prev.map((r) => (r.id === id ? { ...r, name: newName } : r)),
+      );
+      if (savedReportMeta?.id === id) {
+        setSavedReportMeta({ ...savedReportMeta, name: newName });
+      }
+    } catch (e) {
+      console.error("Failed to rename report:", e);
+    }
+  };
+
   const openSavedReportsModal = async () => {
     try {
       const reports = await invoke<SavedReportMeta[]>("list_reports");
@@ -1338,279 +1251,24 @@ function App() {
     }
   };
 
-  const renderReportMoves = () => {
-    if (!postGameReport) return null;
-    const sanMoves = mainLineSanMoves || gameSanMoves;
-
-    if (sanMoves.length === 0) return null;
-
-    const momentMap = new Map<
-      string,
-      (typeof postGameReport.criticalMoments)[number]
-    >();
-    for (const m of postGameReport.criticalMoments) {
-      momentMap.set(`${m.moveNumber}-${m.side}`, m);
+  // Exit report mode but keep the report session in memory.
+  const exitReportToGame = () => {
+    setActiveTabTracked("analysis");
+    if (gameHistory.length > 0) {
+      handlePositionChange(gameHistory[currentMoveIndex]);
     }
+  };
 
-    const elements: React.ReactNode[] = [];
-    // We group moves into rows of 3 full moves (number + white + black).
-    // A critical moment card breaks the row and starts a new one after.
-    let currentRow: React.ReactNode[] = [];
-    let movesInRow = 0; // counts full moves (white+black pairs) in current row
-    let needsContinuation = false;
-
-    const flushRow = (key: string) => {
-      if (currentRow.length > 0) {
-        elements.push(
-          <div key={key} className="report-move-row">
-            {currentRow}
-          </div>,
-        );
-        currentRow = [];
-        movesInRow = 0;
-      }
-    };
-
-    for (let i = 0; i < sanMoves.length; i++) {
-      const moveNumber = Math.floor(i / 2) + 1;
-      const isWhite = i % 2 === 0;
-      const side: "white" | "black" = isWhite ? "white" : "black";
-      const historyIndex = i + 1;
-      const moment = momentMap.get(`${moveNumber}-${side}`);
-      const isPlayerMoment = moment && moment.side === reportPerspective;
-      const isOpportunity =
-        moment &&
-        moment.side !== reportPerspective &&
-        (moment.category === "opportunity" ||
-          moment.category === "golden_opportunity");
-      const isOnMainLine = !isExploringVariation;
-      const isCurrentMove = isOnMainLine && currentMoveIndex === historyIndex;
-
-      // Start a new row every 3 full moves
-      if (isWhite && movesInRow >= 3) {
-        flushRow(`row-before-${i}`);
-      }
-
-      if (isWhite) {
-        currentRow.push(
-          <span
-            key={`num-${i}`}
-            style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}
-          >
-            {moveNumber}.
-          </span>,
-        );
-      } else if (needsContinuation) {
-        // After a critical moment card broke the row, show continuation number
-        currentRow.push(
-          <span
-            key={`cont-${i}`}
-            style={{ color: "#888", fontSize: "0.85rem", marginRight: "2px" }}
-          >
-            {moveNumber}...
-          </span>,
-        );
-        needsContinuation = false;
-      }
-
-      let chipBg = "transparent";
-      let chipColor = "#ddd";
-      let chipBorder = "none";
-
-      if (isCurrentMove) {
-        chipBg = "#3a5a8a";
-        chipColor = "#fff";
-      } else if (isPlayerMoment || isOpportunity) {
-        switch (moment.category) {
-          case "blunder":
-            chipBg = "rgba(255, 80, 80, 0.15)";
-            chipColor = "#ff6b6b";
-            chipBorder = "1px solid rgba(255, 80, 80, 0.3)";
-            break;
-          case "mistake":
-            chipBg = "rgba(255, 165, 0, 0.12)";
-            chipColor = "#ffb067";
-            chipBorder = "1px solid rgba(255, 165, 0, 0.3)";
-            break;
-          case "inaccuracy":
-            chipBg = "rgba(255, 220, 80, 0.1)";
-            chipColor = "#e8d44d";
-            chipBorder = "1px solid rgba(255, 220, 80, 0.25)";
-            break;
-          case "turning_point":
-            chipBg = "rgba(80, 180, 255, 0.12)";
-            chipColor = "#6bc5ff";
-            chipBorder = "1px solid rgba(80, 180, 255, 0.3)";
-            break;
-          case "great_move":
-            chipBg = "rgba(74, 222, 128, 0.15)";
-            chipColor = "#4ade80";
-            chipBorder = "1px solid rgba(74, 222, 128, 0.3)";
-            break;
-          case "critical":
-          case "brilliant":
-            chipBg = "rgba(34, 211, 238, 0.15)";
-            chipColor = "#22d3ee";
-            chipBorder = "1px solid rgba(34, 211, 238, 0.3)";
-            break;
-          case "opportunity":
-            chipBg = "rgba(167, 139, 250, 0.15)";
-            chipColor = "#a78bfa";
-            chipBorder = "1px solid rgba(167, 139, 250, 0.3)";
-            break;
-          case "golden_opportunity":
-            chipBg = "rgba(244, 114, 182, 0.15)";
-            chipColor = "#f472b6";
-            chipBorder = "1px solid rgba(244, 114, 182, 0.3)";
-            break;
-        }
-      }
-
-      currentRow.push(
-        <span
-          key={`move-${i}`}
-          className="move-chip"
-          onClick={() => navigateToMainLineMove(historyIndex)}
-          data-report-active={isCurrentMove ? "true" : undefined}
-          style={{
-            cursor: "pointer",
-            backgroundColor: chipBg,
-            color: chipColor,
-            padding: "2px 6px",
-            borderRadius: "3px",
-            border: chipBorder,
-            marginRight: "4px",
-            fontFamily: "monospace",
-            fontSize: "0.9rem",
-            display: "inline",
-            boxShadow: "none",
-          }}
-        >
-          {sanMoves[i]}
-        </span>,
-      );
-
-      // Count a full move after black's move
-      if (!isWhite) {
-        movesInRow++;
-      }
-
-      // Player's critical moments + opportunities: flush current row, render card, start new row
-      if ((isPlayerMoment || isOpportunity) && moment) {
-        flushRow(`row-before-card-${i}`);
-        elements.push(
-          <div
-            key={`card-${i}`}
-            className="critical-moment-card cm-inline"
-            style={{ cursor: "pointer" }}
-            onClick={() => navigateToMainLineMove(historyIndex)}
-          >
-            <div className="cm-header">
-              <span className={`category-badge badge-${moment.category}`}>
-                {moment.category === "turning_point"
-                  ? "Turning Point"
-                  : moment.category === "great_move"
-                    ? "Great Move"
-                    : moment.category === "critical" ||
-                        moment.category === "brilliant"
-                      ? "Critical"
-                      : moment.category === "golden_opportunity"
-                        ? "Golden Opportunity"
-                        : moment.category === "opportunity"
-                          ? "Opportunity"
-                          : moment.category.charAt(0).toUpperCase() +
-                            moment.category.slice(1)}
-              </span>
-              <span className="cm-move-info">
-                Move {moment.moveNumber}: <strong>{moment.moveSan}</strong>
-              </span>
-              <span
-                className="cm-eval-drop"
-                style={
-                  moment.category === "great_move"
-                    ? { color: "#4ade80" }
-                    : moment.category === "critical" ||
-                        moment.category === "brilliant"
-                      ? { color: "#22d3ee" }
-                      : moment.category === "opportunity" ||
-                          moment.category === "golden_opportunity"
-                        ? { color: "#4ade80" }
-                        : undefined
-                }
-              >
-                {moment.category === "great_move" ||
-                moment.category === "critical" ||
-                moment.category === "brilliant"
-                  ? `+${Math.abs(moment.evalDrop).toFixed(1)}`
-                  : moment.category === "opportunity" ||
-                      moment.category === "golden_opportunity"
-                    ? `+${Math.abs(moment.evalDrop).toFixed(1)}`
-                    : moment.evalDrop > 0
-                      ? `−${moment.evalDrop.toFixed(1)}`
-                      : `+${Math.abs(moment.evalDrop).toFixed(1)}`}
-              </span>
-            </div>
-            {moment.category !== "great_move" &&
-              moment.category !== "critical" &&
-              moment.category !== "brilliant" &&
-              moment.bestLine.length > 0 &&
-              (moment.category === "opportunity" ||
-                moment.category === "golden_opportunity" ||
-                moment.side === reportPerspective) &&
-              (() => {
-                const fenIdx = gameHistory.indexOf(moment.fen);
-                const activeBestLineIdx =
-                  fenIdx >= 0 && isExploringVariation
-                    ? currentMoveIndex - fenIdx - 1
-                    : -1;
-                return (
-                  <div
-                    className="cm-best-line"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <span>
-                      {moment.category === "opportunity" ||
-                      moment.category === "golden_opportunity"
-                        ? "Best response:"
-                        : "Best:"}
-                    </span>
-                    {moment.bestLine.map((san, idx) => {
-                      return (
-                        <span key={idx} style={{ display: "contents" }}>
-                          {idx > 0 && (
-                            <span className="best-line-arrow">→</span>
-                          )}
-                          <span
-                            className={`best-line-move${idx === activeBestLineIdx ? " best-line-active" : ""}`}
-                            onClick={() =>
-                              playBestLine(moment.fen, moment.bestLine, idx)
-                            }
-                          >
-                            {san}
-                          </span>
-                        </span>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-            <div className="cm-explanation">
-              <ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown>
-            </div>
-          </div>,
-        );
-        needsContinuation = isWhite;
-      }
-    }
-
-    // Flush any remaining moves
-    flushRow("row-final");
-
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-        {elements}
-      </div>
-    );
+  // Discard the report session entirely and return to the game.
+  const closeReport = () => {
+    // Invalidate any in-flight analysis so its late results can't
+    // resurrect a closed report.
+    reportGenRef.current++;
+    setPostGameReport(null);
+    setIsPostGameLoading(false);
+    setMainLineHistoryTracked(null);
+    setReportEvaluations(null);
+    setActiveTabTracked("analysis");
   };
 
   // Show setup wizard on first launch
@@ -1624,1047 +1282,380 @@ function App() {
     );
   }
 
+  const reportMode = activeTab === "report";
+  const reportTitle =
+    savedReportMeta?.openingMoves ||
+    (gameSanList.length > 0
+      ? buildPgn(gameSanList.slice(0, 6), gameHistory[0])
+      : "Game report");
+
   return (
     <main className="container">
-      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-        <h1 style={{ margin: "0.67em 0" }}>Rook</h1>
-        <button
-          className="settings-button"
-          onClick={() => setShowApiKeyModal(true)}
-          title="API Key Settings"
-        >
-          <KeyIcon />
-        </button>
-      </div>
-      <div className="eval-bar-container">
-        <div className="eval-bar-black-side" />
-        <div
-          className="eval-bar-white-side"
-          style={{ width: `${evalInfo.percent}%` }}
+      <header className="app-header">
+        <h1 className="app-title">Rook</h1>
+        <div className="header-actions">
+          <button
+            className="settings-button"
+            onClick={() => setShowHelpModal(true)}
+            title="Keyboard shortcuts"
+          >
+            <HelpIcon />
+          </button>
+          <button
+            className="settings-button"
+            onClick={() => setShowSettingsModal(true)}
+            title="Settings"
+          >
+            <SettingsIcon />
+          </button>
+        </div>
+      </header>
+
+      {reportMode ? (
+        <ReportView
+          fen={game.fen()}
+          boardOrientation={boardOrientation}
+          arrows={bestMoveArrows}
+          squareStyles={moveHighlightSquares}
+          onPieceDrop={onDrop}
+          evaluation={evaluation}
+          sideToMove={game.turn()}
+          isCheckmate={game.isCheckmate()}
+          currentMoveIndex={currentMoveIndex}
+          historyLength={gameHistory.length}
+          onStart={moveToStart}
+          onBack={moveBack}
+          onForward={moveForward}
+          onEnd={moveToEnd}
+          onFlip={flipBoard}
+          title={reportTitle}
+          perspective={reportPerspective}
+          result={savedReportMeta?.result}
+          onExitToGame={exitReportToGame}
+          onCloseReport={closeReport}
+          onRegenerate={() => requestPostGameReport()}
+          onOpenLibrary={openSavedReportsModal}
+          isLoading={isPostGameLoading}
+          analysisProgress={analysisProgress}
+          report={postGameReport}
+          reportPerspective={reportPerspective}
+          mainLineHistory={mainLineHistory}
+          mainLineSanMoves={mainLineSanMoves}
+          gameHistory={gameHistory}
+          gameSanList={gameSanList}
+          isExploringVariation={isExploringVariation}
+          onNavigateToMainLineMove={navigateToMainLineMove}
+          onPlayBestLine={playBestLine}
+          onBackToMainLine={backToMainLine}
         />
-        <div className="eval-bar-label" style={{ color: evalInfo.labelColor }}>
-          {evalInfo.label}
-        </div>
-      </div>
+      ) : (
+        <div className="play-layout">
+          <BoardSection
+            fen={game.fen()}
+            boardOrientation={boardOrientation}
+            arrows={currentMoveIndex === 0 ? [] : bestMoveArrows}
+            squareStyles={moveHighlightSquares}
+            onPieceDrop={onDrop}
+            evaluation={evaluation}
+            sideToMove={game.turn()}
+            isCheckmate={game.isCheckmate()}
+            hasGame={currentMoveIndex > 0}
+            canNavigateBack={currentMoveIndex > 0}
+            canNavigateForward={currentMoveIndex < gameHistory.length - 1}
+            onStart={moveToStart}
+            onBack={moveBack}
+            onForward={moveForward}
+            onEnd={moveToEnd}
+            onFlip={flipBoard}
+            onImport={() => setShowImportModal(true)}
+            onReset={resetBoard}
+          />
 
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          gap: "30px",
-          width: "100%",
-          maxWidth: "1000px",
-          justifyContent: "center",
-          alignItems: "flex-start",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: "15px",
-            width: "550px",
-            maxWidth: "100%",
-          }}
-        >
-          <div style={{ boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
-            <Chessboard
-              options={{
-                position: game.fen(),
-                onPieceDrop: onDrop,
-                arrows: currentMoveIndex === 0 ? [] : bestMoveArrows,
-                boardOrientation: boardOrientation,
-                animationDurationInMs: 120,
-                squareStyles: moveHighlightSquares,
-              }}
-            />
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: "10px",
-            }}
-          >
-            <button
-              className="action-button"
-              onClick={moveToStart}
-              disabled={currentMoveIndex === 0}
-            >
-              <SkipBackIcon /> Start
-            </button>
-            <button
-              className="action-button"
-              onClick={moveBack}
-              disabled={currentMoveIndex === 0}
-            >
-              <BackIcon /> Back
-            </button>
-            <button
-              className="action-button"
-              onClick={moveForward}
-              disabled={currentMoveIndex === gameHistory.length - 1}
-            >
-              Forward <ForwardIcon />
-            </button>
-            <button
-              className="action-button"
-              onClick={moveToEnd}
-              disabled={currentMoveIndex === gameHistory.length - 1}
-            >
-              End <SkipForwardIcon />
-            </button>
-            <button className="action-button" onClick={flipBoard}>
-              <FlipIcon /> Flip
-            </button>
-            <button className="action-button" onClick={resetBoard}>
-              <ResetIcon /> Reset
-            </button>
-          </div>
-
-          {isExploringVariation && (
-            <button className="back-to-main-btn" onClick={backToMainLine}>
-              ← Back to main line
-            </button>
-          )}
-
-          {/* Import Game Field */}
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "5px",
-              width: "100%",
-              marginTop: "10px",
-            }}
-          >
-            <div style={{ display: "flex", gap: "10px" }}>
-              <input
-                type="text"
-                placeholder="Paste FEN or PGN string here to import a position..."
-                value={importInput}
-                onChange={(e) => setImportInput(e.target.value)}
-                style={{
-                  flex: 1,
-                  padding: "10px",
-                  borderRadius: "8px",
-                  border: "1px solid #ccc",
-                  fontSize: "0.9rem",
-                }}
-                onKeyDown={(e) => e.key === "Enter" && handleImport()}
-              />
-              <button
-                className="action-button"
-                onClick={handleImport}
-                style={{ flex: "none", width: "80px" }}
-              >
-                Import
-              </button>
-            </div>
-            {importError && (
-              <div
-                style={{
-                  color: "red",
-                  fontSize: "0.8rem",
-                  textAlign: "left",
-                  paddingLeft: "5px",
-                }}
-              >
-                {importError}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div
-          style={{
-            width: "400px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "20px",
-          }}
-        >
-          {/* Tab-based Coach Panel */}
-          <div className="tab-panel">
-            {/* Tab Bar */}
-            <div className="tab-bar">
-              <button
-                className={`tab-button${activeTab === "analysis" ? " tab-active" : ""}`}
-                onClick={() => setActiveTabTracked("analysis")}
-              >
-                Analysis
-              </button>
-              <button
-                className={`tab-button${activeTab === "strategize" ? " tab-active" : ""}`}
-                onClick={() => setActiveTabTracked("strategize")}
-              >
-                Strategize
-              </button>
-
-              <button
-                className={`tab-button${activeTab === "report" ? " tab-active" : ""}`}
-                onClick={() => setActiveTabTracked("report")}
-              >
-                Report
-                {savedReportMeta && activeTab !== "report" && (
-                  <span className="saved-indicator" />
-                )}
-                {postGameReport && activeTab === "report" && (
-                  <span
-                    className="tab-close"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPostGameReport(null);
-                      setIsPostGameLoading(false);
-                      setMainLineHistoryTracked(null);
-                      setReportEvaluations(null);
-                    }}
-                    title="Close report"
-                  >
-                    &times;
-                  </span>
-                )}
-              </button>
-            </div>
-
-            {/* Tab Content */}
-            <div className="tab-content">
-              {activeTab === "strategize" && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "10px",
-                    height: "100%",
+          <div className="side-col">
+            {/* Reports are the app's main value — they lead the column. */}
+            <div className="report-entry">
+              {postGameReport ? (
+                <button
+                  className="action-button report-entry-btn"
+                  onClick={() => {
+                    setActiveTabTracked("report");
+                    handlePositionChange(gameHistory[currentMoveIndex]);
                   }}
                 >
+                  <ReportIcon /> View Report
+                </button>
+              ) : (
+                <button
+                  className="action-button report-entry-btn"
+                  onClick={() => {
+                    setReportPerspective(boardOrientation);
+                    setShowReportSetup(true);
+                  }}
+                  disabled={gameHistory.length <= 1 || isPostGameLoading}
+                >
+                  <ReportIcon /> Generate Report
+                </button>
+              )}
+              {savedReportMeta && (
+                <div className="saved-report-notice">
+                  <span>A saved report exists for this game</span>
                   <button
                     className="action-button"
-                    onClick={askCoach}
-                    disabled={isCoachLoading || !evaluation}
+                    onClick={() => loadSavedReport(savedReportMeta.id)}
                     style={{
                       flex: "none",
-                      padding: "10px",
-                      fontSize: "0.9rem",
+                      padding: "6px 14px",
+                      fontSize: "0.8rem",
                     }}
                   >
-                    <CoachIcon />{" "}
-                    {isCoachLoading ? "Thinking..." : "Strategize"}
+                    Load
                   </button>
-                  <div
-                    style={{
-                      fontSize: "0.9rem",
-                      lineHeight: "1.4",
-                      color: "#ccc",
-                      overflowY: "auto",
-                      fontStyle: coachMessage ? "normal" : "italic",
-                      flex: 1,
-                    }}
-                  >
-                    {coachMessage ? (
-                      <ReactMarkdown>{stripLatex(coachMessage)}</ReactMarkdown>
-                    ) : isCoachLoading ? (
-                      "Coach is looking at the board..."
-                    ) : (
-                      "Click 'Strategize' to get quick insights about the current position from the AI coach."
-                    )}
-                  </div>
                 </div>
               )}
+              <button
+                className="action-button report-entry-btn"
+                onClick={openSavedReportsModal}
+              >
+                Browse Saved Reports
+              </button>
+            </div>
 
-              {activeTab === "analysis" && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "10px",
-                    height: "100%",
-                  }}
+            {/* Tab panel: Explorer (engine lines) is the default view */}
+            <div className="tab-panel">
+              <div className="tab-bar">
+                <button
+                  className={`tab-button${activeTab === "analysis" ? " tab-active" : ""}`}
+                  onClick={() => setActiveTabTracked("analysis")}
                 >
-                  <h3
-                    style={{
-                      marginTop: 0,
-                      marginBottom: 0,
-                      borderBottom: "1px solid #444",
-                      paddingBottom: "12px",
-                      color: "#fff",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <span>
-                      Best Lines for {game.turn() === "w" ? "White" : "Black"}
-                    </span>
-                    <span
+                  Explorer
+                </button>
+                <button
+                  className={`tab-button${activeTab === "strategize" ? " tab-active" : ""}`}
+                  onClick={() => setActiveTabTracked("strategize")}
+                >
+                  Coach
+                </button>
+              </div>
+
+              <div className="tab-content">
+                {activeTab === "strategize" && (
+                  <div className="tab-pane">
+                    <button
+                      className="action-button"
+                      onClick={askCoach}
+                      disabled={isCoachLoading || !evaluation}
                       style={{
-                        fontSize: "0.8rem",
-                        fontWeight: "normal",
-                        color: "#888",
-                        backgroundColor: "#333",
-                        padding: "4px 8px",
-                        borderRadius: "4px",
+                        flex: "none",
+                        padding: "10px",
+                        fontSize: "0.9rem",
                       }}
                     >
-                      Stockfish 16
-                    </span>
-                  </h3>
+                      <CoachIcon />{" "}
+                      {isCoachLoading ? "Thinking..." : "Strategize"}
+                    </button>
+                    <div
+                      className={`coach-message${coachMessage ? "" : " coach-message-empty"}`}
+                    >
+                      {coachMessage ? (
+                        <ReactMarkdown>{stripLatex(coachMessage)}</ReactMarkdown>
+                      ) : isCoachLoading ? (
+                        "Coach is looking at the board..."
+                      ) : (
+                        "Click 'Strategize' to get quick insights about the current position from the AI coach."
+                      )}
+                    </div>
+                  </div>
+                )}
 
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "10px",
-                      flex: 1,
-                      overflowY: "auto",
-                    }}
-                  >
-                    {displayThoughts.length === 0 && (
-                      <div
+                {activeTab === "analysis" && (
+                  <div className="tab-pane">
+                    <h3
+                      style={{
+                        marginTop: 0,
+                        marginBottom: 0,
+                        borderBottom: "1px solid #444",
+                        paddingBottom: "12px",
+                        color: "#fff",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <span>
+                        Best Lines for {game.turn() === "w" ? "White" : "Black"}
+                      </span>
+                      <span
                         style={{
-                          fontStyle: "italic",
+                          fontSize: "0.8rem",
+                          fontWeight: "normal",
                           color: "#888",
-                          textAlign: "center",
-                          marginTop: "20px",
+                          backgroundColor: "#333",
+                          padding: "4px 8px",
+                          borderRadius: "4px",
                         }}
                       >
-                        Analyzing current position...
-                      </div>
-                    )}
+                        Stockfish
+                      </span>
+                    </h3>
 
-                    {displayThoughts.map((thought) => {
-                      const lineScore = parseScore(thought.score);
-                      const bestLine = displayThoughts.find(
-                        (t) => t.multipv === 1,
-                      );
-                      const bestScore = bestLine
-                        ? parseScore(bestLine.score)
-                        : 0;
-                      const isBlunder =
-                        thought.multipv !== 1 &&
-                        bestScore > 1.0 &&
-                        lineScore < 0;
-                      const style = getLineStyle(
-                        isBlunder ? "red" : thought.multipv,
-                      );
-                      return (
-                        <div
-                          key={thought.multipv}
-                          style={{
-                            backgroundColor: style.bg,
-                            border: `1px solid ${style.border}`,
-                            borderRadius: "6px",
-                            padding: "10px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "6px",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              fontSize: "0.8rem",
-                              color: style.text,
-                            }}
-                          >
-                            <span>
-                              <strong>Line #{thought.multipv}</strong>
-                            </span>
-                            <span style={{ fontWeight: "bold" }}>
-                              Eval:{" "}
-                              {thought.score.startsWith("-") ||
-                              thought.score.startsWith("M")
-                                ? thought.score
-                                : `+${thought.score}`}
-                            </span>
-                          </div>
-                          <div
-                            style={{
-                              display: "flex",
-                              flexWrap: "wrap",
-                              gap: "6px",
-                            }}
-                          >
-                            {thought.moves.map((san, i) => {
-                              if (!san) return null;
-                              return (
-                                <button
-                                  key={i}
-                                  className="move-chip"
-                                  onClick={() =>
-                                    playLineToMove(thought.rawMoves, i)
-                                  }
-                                  style={{
-                                    backgroundColor: style.chipBg,
-                                    color: style.text,
-                                  }}
-                                >
-                                  {san}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {activeTab === "report" && (
-                <div
-                  style={{
-                    fontSize: "0.9rem",
-                    lineHeight: "1.4",
-                    color: "#ccc",
-                    overflowY: "auto",
-                    height: "100%",
-                  }}
-                >
-                  {isPostGameLoading && analysisProgress ? (
-                    <div className="analysis-progress">
-                      {analysisProgress.phase === "engine" && (
-                        <>
-                          <div className="progress-label">
-                            Evaluating positions with Stockfish...
-                          </div>
-                          <div className="progress-bar-track">
-                            <div
-                              className="progress-bar-fill"
-                              style={{
-                                width: `${(analysisProgress.current / analysisProgress.total) * 100}%`,
-                              }}
-                            />
-                          </div>
-                          <div className="progress-count">
-                            {analysisProgress.current} /{" "}
-                            {analysisProgress.total} positions
-                          </div>
-                        </>
-                      )}
-                      {analysisProgress.phase === "lc0" && (
-                        <>
-                          <div className="progress-label">
-                            Lc0 strategic analysis...
-                            {analysisProgress.backend && (
-                              <span
-                                className="lc0-backend-badge"
-                                data-gpu={
-                                  ![
-                                    "eigen",
-                                    "trivial",
-                                    "random",
-                                    "unknown",
-                                  ].includes(analysisProgress.backend)
-                                }
-                              >
-                                {analysisProgress.backend}
-                              </span>
-                            )}
-                          </div>
-                          {analysisProgress.backend &&
-                            ["eigen", "trivial", "random"].includes(
-                              analysisProgress.backend,
-                            ) && (
-                              <div className="lc0-cpu-warning">
-                                CPU fallback — install Lc0 with OpenCL for GPU
-                                acceleration
-                              </div>
-                            )}
-                          <div className="progress-bar-track">
-                            <div
-                              className="progress-bar-fill lc0-fill"
-                              style={{
-                                width: `${analysisProgress.total > 0 ? (analysisProgress.current / analysisProgress.total) * 100 : 0}%`,
-                              }}
-                            />
-                          </div>
-                          <div className="progress-count">
-                            {analysisProgress.current} /{" "}
-                            {analysisProgress.total} positions
-                          </div>
-                        </>
-                      )}
-                      {analysisProgress.phase === "llm" && (
-                        <>
-                          <div className="progress-label">
-                            AI analyzing critical moments...
-                          </div>
-                          <div className="progress-bar-track">
-                            <div
-                              className="progress-bar-fill"
-                              style={{
-                                width: `${(analysisProgress.current / analysisProgress.total) * 100}%`,
-                              }}
-                            />
-                          </div>
-                          <div className="progress-count">
-                            {analysisProgress.current} /{" "}
-                            {analysisProgress.total} moments
-                          </div>
-                        </>
-                      )}
-                      {analysisProgress.phase === "summary" && (
-                        <div className="progress-label">
-                          Generating thematic summary...
-                        </div>
-                      )}
-                    </div>
-                  ) : postGameReport ? (
-                    <div className="report-content">
-                      <div className="report-summary">
-                        <ReactMarkdown>
-                          {stripLatex(postGameReport.thematicSummary)}
-                        </ReactMarkdown>
-                      </div>
-                      {renderReportMoves()}
-                      {postGameReport.criticalMoments.filter(
-                        (m) =>
-                          m.side === reportPerspective ||
-                          m.category === "opportunity" ||
-                          m.category === "golden_opportunity",
-                      ).length === 0 && (
-                        <div
-                          style={{
-                            fontStyle: "italic",
-                            color: "#888",
-                            textAlign: "center",
-                            marginTop: "12px",
-                          }}
-                        >
-                          No critical moments detected for your play — solid
-                          game!
-                        </div>
-                      )}
-                    </div>
-                  ) : (
                     <div
                       style={{
                         display: "flex",
                         flexDirection: "column",
-                        gap: "12px",
-                        alignItems: "center",
-                        paddingTop: "20px",
+                        gap: "10px",
+                        flex: 1,
+                        overflowY: "auto",
                       }}
                     >
-                      <button
-                        className="action-button"
-                        onClick={() => {
-                          setReportPerspective(boardOrientation);
-                          setShowReportSetup(true);
-                        }}
-                        disabled={gameHistory.length <= 1 || isPostGameLoading}
-                        style={{
-                          width: "100%",
-                          justifyContent: "center",
-                          padding: "12px",
-                        }}
-                      >
-                        <ReportIcon /> Generate Report
-                      </button>
-                      {savedReportMeta && (
-                        <div className="saved-report-notice">
-                          <span>A saved report exists for this game</span>
-                          <button
-                            className="action-button"
-                            onClick={() => loadSavedReport(savedReportMeta.id)}
-                            style={{
-                              flex: "none",
-                              padding: "6px 14px",
-                              fontSize: "0.8rem",
-                            }}
-                          >
-                            Load
-                          </button>
+                      {displayThoughts.length === 0 && (
+                        <div className="lines-empty">
+                          Analyzing current position...
                         </div>
                       )}
-                      <button
-                        className="action-button"
-                        onClick={openSavedReportsModal}
-                        style={{
-                          width: "100%",
-                          justifyContent: "center",
-                          padding: "10px",
-                          fontSize: "0.85rem",
-                        }}
-                      >
-                        Browse Saved Reports
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
 
-      {/* Report Setup Modal */}
-      {showReportSetup && (
-        <div
-          className="report-setup-overlay"
-          onClick={() => setShowReportSetup(false)}
-        >
-          <div
-            className="report-setup-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3
-              style={{
-                margin: "0 0 16px 0",
-                fontSize: "1.05rem",
-                color: "#fff",
-              }}
-            >
-              Full Game Report
-            </h3>
-            <p
-              style={{
-                margin: "0 0 12px 0",
-                fontSize: "0.85rem",
-                color: "#aaa",
-              }}
-            >
-              Who is this report for?
-            </p>
-            <div className="perspective-selector">
-              <button
-                className={`perspective-option ${reportPerspective === "white" ? "selected" : ""}`}
-                onClick={() => setReportPerspective("white")}
-              >
-                <span style={{ fontSize: "1.2rem" }}>&#9812;</span> White
-              </button>
-              <button
-                className={`perspective-option ${reportPerspective === "black" ? "selected" : ""}`}
-                onClick={() => setReportPerspective("black")}
-              >
-                <span style={{ fontSize: "1.2rem" }}>&#9818;</span> Black
-              </button>
-            </div>
-            <div
-              className="model-toggle-row"
-              style={{ marginTop: "16px", marginBottom: "0" }}
-            >
-              <div className="model-toggle-label">
-                <span className="model-toggle-title">Show what I did well</span>
-                <span className="model-toggle-desc">
-                  Highlight great moves that shifted the game in your favor
-                </span>
-              </div>
-              <button
-                className={`toggle-switch ${includeGreatMoves ? "toggle-on" : ""}`}
-                onClick={() => setIncludeGreatMoves(!includeGreatMoves)}
-                role="switch"
-                aria-checked={includeGreatMoves}
-              >
-                <span className="toggle-knob" />
-              </button>
-            </div>
-            <div
-              className="model-toggle-row"
-              style={{ marginTop: "16px", marginBottom: "0" }}
-            >
-              <div className="model-toggle-label">
-                <span className="model-toggle-title">Show opportunities</span>
-                <span className="model-toggle-desc">
-                  Highlight moments where your opponent gave you a chance to
-                  seize the advantage
-                </span>
-              </div>
-              <button
-                className={`toggle-switch ${includeOpportunities ? "toggle-on" : ""}`}
-                onClick={() => setIncludeOpportunities(!includeOpportunities)}
-                role="switch"
-                aria-checked={includeOpportunities}
-              >
-                <span className="toggle-knob" />
-              </button>
-            </div>
-            {appConfig?.engineMode === "hybrid" && (
-              <div
-                className="model-toggle-row"
-                style={{ marginTop: "16px", marginBottom: "0" }}
-              >
-                <div className="model-toggle-label">
-                  <span className="model-toggle-title">Use Lc0 analysis</span>
-                  <span className="model-toggle-desc">
-                    Add Leela Chess Zero strategic insight and WDL probabilities
-                  </span>
-                </div>
-                <button
-                  className={`toggle-switch ${useLc0 ? "toggle-on" : ""}`}
-                  onClick={() => setUseLc0(!useLc0)}
-                  role="switch"
-                  aria-checked={useLc0}
-                >
-                  <span className="toggle-knob" />
-                </button>
-              </div>
-            )}
-            <div
-              className="model-toggle-row"
-              style={{ marginTop: "16px", marginBottom: "0" }}
-            >
-              <div className="model-toggle-label">
-                <span className="model-toggle-title">Detailed report</span>
-                <span className="model-toggle-desc">
-                  Lower thresholds to flag more moments for broader game
-                  coverage
-                </span>
-              </div>
-              <button
-                className={`toggle-switch ${detailedReport ? "toggle-on" : ""}`}
-                onClick={() => setDetailedReport(!detailedReport)}
-                role="switch"
-                aria-checked={detailedReport}
-              >
-                <span className="toggle-knob" />
-              </button>
-            </div>
-            <p
-              style={{
-                margin: "16px 0 8px 0",
-                fontSize: "0.85rem",
-                color: "#aaa",
-              }}
-            >
-              Analysis depth
-            </p>
-            <div className="perspective-selector">
-              <button
-                className={`perspective-option ${analysisDepth === 8 ? "selected" : ""}`}
-                onClick={() => setAnalysisDepth(8)}
-              >
-                Quick
-              </button>
-              <button
-                className={`perspective-option ${analysisDepth === 12 ? "selected" : ""}`}
-                onClick={() => setAnalysisDepth(12)}
-              >
-                Standard
-              </button>
-              <button
-                className={`perspective-option ${analysisDepth === 18 ? "selected" : ""}`}
-                onClick={() => setAnalysisDepth(18)}
-              >
-                Deep
-              </button>
-            </div>
-            <button
-              className="action-button"
-              onClick={() => {
-                setShowReportSetup(false);
-                requestPostGameReport();
-                invoke("save_report_settings", {
-                  analysisDepth: analysisDepth,
-                  includeGreatMoves: includeGreatMoves,
-                  detailedReport: detailedReport,
-                  useLc0: useLc0,
-                  includeOpportunities: includeOpportunities,
-                }).catch(() => {});
-              }}
-              style={{
-                width: "100%",
-                marginTop: "16px",
-                padding: "10px",
-                justifyContent: "center",
-              }}
-            >
-              <ReportIcon /> Analyze Game
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Saved Reports Modal */}
-      {showSavedReportsModal && (
-        <div
-          className="saved-reports-overlay"
-          onClick={() => setShowSavedReportsModal(false)}
-        >
-          <div
-            className="saved-reports-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2>
-              <span>Saved Reports</span>
-              <button
-                className="api-key-modal-close"
-                onClick={() => setShowSavedReportsModal(false)}
-              >
-                ✕
-              </button>
-            </h2>
-            {savedReportsList.length === 0 ? (
-              <div
-                style={{
-                  fontStyle: "italic",
-                  color: "#888",
-                  textAlign: "center",
-                  padding: "20px 0",
-                }}
-              >
-                No saved reports yet.
-              </div>
-            ) : (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "8px",
-                  maxHeight: "400px",
-                  overflowY: "auto",
-                }}
-              >
-                {savedReportsList.map((report) => (
-                  <div key={report.id} className="saved-report-item">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontSize: "0.88rem",
-                          color: "#eee",
-                          marginBottom: "4px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {report.openingMoves || "No moves"}
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: "8px",
-                          alignItems: "center",
-                          fontSize: "0.75rem",
-                          color: "#888",
-                        }}
-                      >
-                        <span
-                          className={`perspective-badge perspective-${report.perspective}`}
-                        >
-                          {report.perspective}
-                        </span>
-                        {report.result && report.result !== "unknown" && (
-                          <span
-                            className={`result-badge result-${report.result}`}
+                      {displayThoughts.map((thought) => {
+                        const lineScore = parseScore(thought.score);
+                        const bestLine = displayThoughts.find(
+                          (t) => t.multipv === 1,
+                        );
+                        const bestScore = bestLine
+                          ? parseScore(bestLine.score)
+                          : 0;
+                        const isBlunder =
+                          thought.multipv !== 1 &&
+                          bestScore > 1.0 &&
+                          lineScore < 0;
+                        const style = getLineStyle(
+                          isBlunder ? "red" : thought.multipv,
+                        );
+                        return (
+                          <div
+                            key={thought.multipv}
+                            style={{
+                              backgroundColor: style.bg,
+                              border: `1px solid ${style.border}`,
+                              borderRadius: "6px",
+                              padding: "10px",
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "6px",
+                            }}
                           >
-                            {report.result === "win"
-                              ? "W"
-                              : report.result === "loss"
-                                ? "L"
-                                : "D"}
-                          </span>
-                        )}
-                        <span>
-                          {new Date(report.createdAt).toLocaleDateString()}
-                        </span>
-                        <span>{report.moveCount} moves</span>
-                        <span>
-                          {report.criticalMomentCount} critical moments
-                        </span>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
-                      <button
-                        className="action-button"
-                        onClick={() => loadSavedReport(report.id)}
-                        style={{
-                          flex: "none",
-                          padding: "6px 12px",
-                          fontSize: "0.78rem",
-                        }}
-                      >
-                        Load
-                      </button>
-                      <button
-                        className="action-button"
-                        onClick={() => handleDeleteReport(report.id)}
-                        style={{
-                          flex: "none",
-                          padding: "6px 12px",
-                          fontSize: "0.78rem",
-                          color: "#ff6b6b",
-                        }}
-                      >
-                        Delete
-                      </button>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                fontSize: "0.8rem",
+                                color: style.text,
+                              }}
+                            >
+                              <span>
+                                <strong>Line #{thought.multipv}</strong>
+                              </span>
+                              <span style={{ fontWeight: "bold" }}>
+                                Eval:{" "}
+                                {thought.score.startsWith("-") ||
+                                thought.score.startsWith("M")
+                                  ? thought.score
+                                  : `+${thought.score}`}
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: "6px",
+                              }}
+                            >
+                              {thought.moves.map((san, i) => {
+                                if (!san) return null;
+                                return (
+                                  <button
+                                    key={i}
+                                    className="move-chip"
+                                    onClick={() =>
+                                      playLineToMove(thought.rawMoves, i)
+                                    }
+                                    style={{
+                                      backgroundColor: style.chipBg,
+                                      color: style.text,
+                                    }}
+                                  >
+                                    {san}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
-                ))}
+                )}
               </div>
-            )}
+            </div>
+
+            <MovesPanel
+              fens={gameHistory}
+              sans={gameSanList}
+              currentIndex={currentMoveIndex}
+              onNavigate={navigateToMove}
+            />
+
           </div>
         </div>
       )}
 
-      {/* API Key Modal */}
-      {showApiKeyModal && (
-        <div
-          className="api-key-modal-overlay"
-          onClick={() => setShowApiKeyModal(false)}
-        >
-          <div className="api-key-modal" onClick={(e) => e.stopPropagation()}>
-            <h2>
-              <span>API Key Settings</span>
-              <button
-                className="api-key-modal-close"
-                onClick={() => setShowApiKeyModal(false)}
-              >
-                ✕
-              </button>
-            </h2>
-
-            {/* Gemini Section */}
-            <div className="api-key-section">
-              <h4>Gemini API Key</h4>
-              {apiKeyStatus?.gemini_set ? (
-                <div className="api-key-saved">
-                  <span className="key-hint">{apiKeyStatus.gemini_hint}</span>
-                  <button onClick={() => handleRemoveKey("gemini")}>
-                    Remove
-                  </button>
-                </div>
-              ) : (
-                <div className="api-key-input-group">
-                  <input
-                    type={showGeminiKey ? "text" : "password"}
-                    placeholder="Enter Gemini API key..."
-                    value={geminiKeyInput}
-                    onChange={(e) => setGeminiKeyInput(e.target.value)}
-                    onKeyDown={(e) =>
-                      e.key === "Enter" && handleSaveKey("gemini")
-                    }
-                  />
-                  <button
-                    className="eye-toggle"
-                    onClick={() => setShowGeminiKey(!showGeminiKey)}
-                  >
-                    {showGeminiKey ? <EyeOffIcon /> : <EyeIcon />}
-                  </button>
-                  <button onClick={() => handleSaveKey("gemini")}>Save</button>
-                </div>
-              )}
-            </div>
-
-            {/* Gemini Pro Toggle */}
-            {apiKeyStatus?.gemini_set && (
-              <div className="model-toggle-row">
-                <div className="model-toggle-label">
-                  <span className="model-toggle-title">
-                    Gemini 3.1 Pro Preview
-                  </span>
-                  <span className="model-toggle-desc">
-                    Use Pro instead of Flash for Deep Analysis. Slower but
-                    higher quality.
-                  </span>
-                </div>
-                <button
-                  className={`toggle-switch ${apiKeyStatus.gemini_pro_enabled ? "toggle-on" : ""}`}
-                  onClick={handleToggleGeminiPro}
-                  role="switch"
-                  aria-checked={apiKeyStatus.gemini_pro_enabled}
-                >
-                  <span className="toggle-knob" />
-                </button>
-              </div>
-            )}
-
-            {/* OpenAI Section */}
-            <div className="api-key-section">
-              <h4>OpenAI API Key</h4>
-              {apiKeyStatus?.openai_set ? (
-                <div className="api-key-saved">
-                  <span className="key-hint">{apiKeyStatus.openai_hint}</span>
-                  <button onClick={() => handleRemoveKey("openai")}>
-                    Remove
-                  </button>
-                </div>
-              ) : (
-                <div className="api-key-input-group">
-                  <input
-                    type={showOpenaiKey ? "text" : "password"}
-                    placeholder="Enter OpenAI API key..."
-                    value={openaiKeyInput}
-                    onChange={(e) => setOpenaiKeyInput(e.target.value)}
-                    onKeyDown={(e) =>
-                      e.key === "Enter" && handleSaveKey("openai")
-                    }
-                  />
-                  <button
-                    className="eye-toggle"
-                    onClick={() => setShowOpenaiKey(!showOpenaiKey)}
-                  >
-                    {showOpenaiKey ? <EyeOffIcon /> : <EyeIcon />}
-                  </button>
-                  <button onClick={() => handleSaveKey("openai")}>Save</button>
-                </div>
-              )}
-            </div>
-
-            {/* Engine Mode Section */}
-            <div className="api-key-section">
-              <h4>Engine Mode</h4>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: "8px",
-                }}
-              >
-                <span style={{ fontSize: "0.85rem", color: "#ccc" }}>
-                  {appConfig?.engineMode === "hybrid"
-                    ? "Stockfish + Lc0 (Advanced)"
-                    : "Stockfish Only (Standard)"}
-                </span>
-                <button
-                  className="action-button"
-                  onClick={async () => {
-                    if (appConfig?.engineMode === "hybrid") {
-                      await invoke("set_engine_mode", {
-                        mode: "stockfish_only",
-                      });
-                    } else {
-                      await invoke("set_engine_mode", { mode: "hybrid" });
-                    }
-                    const config = await invoke<AppConfig>("get_app_config");
-                    setAppConfig(config);
-                  }}
-                  style={{
-                    flex: "none",
-                    padding: "6px 12px",
-                    fontSize: "0.78rem",
-                  }}
-                >
-                  {appConfig?.engineMode === "hybrid"
-                    ? "Switch to Standard"
-                    : "Switch to Advanced"}
-                </button>
-              </div>
-            </div>
-
-            {/* Info Box */}
-            <div className="api-key-info">
-              Adding your own API key unlocks deep thinking for Deep Analysis:
-              Gemini 3 Flash with thinking (high), or OpenAI o4-mini (reasoning
-              model). Without a key, Gemini 3 Flash is used without thinking.
-              Get a free Gemini key from{" "}
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: "#7ab3ff" }}
-              >
-                Google AI Studio
-              </a>
-              .
-            </div>
-          </div>
-        </div>
+      {/* Modals */}
+      {showReportSetup && (
+        <ReportSetupModal
+          appConfig={appConfig}
+          reportPerspective={reportPerspective}
+          onPerspectiveChange={setReportPerspective}
+          settings={reportSettings}
+          onUpdateSettings={updateReportSettings}
+          onAnalyze={() => {
+            setShowReportSetup(false);
+            requestPostGameReport();
+          }}
+          onClose={() => setShowReportSetup(false)}
+        />
       )}
+
+      {showSavedReportsModal && (
+        <SavedReportsModal
+          reports={savedReportsList}
+          busy={isPostGameLoading}
+          onLoad={loadSavedReport}
+          onRegenerate={regenerateReport}
+          onDelete={handleDeleteReport}
+          onRename={handleRenameReport}
+          onClose={() => setShowSavedReportsModal(false)}
+        />
+      )}
+
+      {showImportModal && (
+        <ImportModal
+          onImport={handleImportInput}
+          onClose={() => setShowImportModal(false)}
+        />
+      )}
+
+      {showSettingsModal && (
+        <SettingsModal
+          apiKeyStatus={apiKeyStatus}
+          onSaveKey={handleSaveKey}
+          onRemoveKey={handleRemoveKey}
+          onToggleGeminiPro={handleToggleGeminiPro}
+          appConfig={appConfig}
+          onToggleEngineMode={handleToggleEngineMode}
+          reportSettings={reportSettings}
+          onUpdateReportSettings={updateReportSettings}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {showHelpModal && <ShortcutsModal onClose={() => setShowHelpModal(false)} />}
     </main>
   );
 }

@@ -1,11 +1,8 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
 :root {
+  /* Single source of truth for board sizing — the side column height is
+     derived from this so the columns always line up. */
+  --board-size: 560px;
+
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -45,22 +42,6 @@ body {
   body {
     background-color: #2b2b2b;
   }
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
 }
 
 a {
@@ -106,10 +87,6 @@ button:active {
 input,
 button {
   outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -181,44 +158,466 @@ button {
   border-color: #fff;
 }
 
-.eval-bar-container {
+/* ═══ App layout ═══ */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  max-width: 1000px;
-  height: 32px;
+  max-width: 1180px;
+  margin-bottom: 4px;
+}
+
+.app-title {
+  margin: 0.4em 0;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.play-layout {
+  display: flex;
+  gap: 24px;
+  width: 100%;
+  max-width: 1180px;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* Board column: the eval bar is pinned to the board's exact height by
+   .board-row, so it can never be resized by the side column's content. */
+.board-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: calc(var(--board-size) + 40px); /* board + eval bar + gap */
+  max-width: 100%;
+}
+
+.board-row {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.board-wrap {
+  width: var(--board-size);
+  max-width: 100%;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.side-col {
+  width: 400px;
+  /* Definite height matching the board column (board + toolbar + gap),
+     so the flex children divide it up instead of growing past it. */
+  height: calc(var(--board-size) + 52px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Vertical eval bar beside the board */
+.eval-bar-v {
+  width: 26px;
+  align-self: stretch;
+  position: relative;
   border-radius: 8px;
   overflow: hidden;
-  position: relative;
   background-color: #333;
-  margin-bottom: 20px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
-.eval-bar-black-side {
+.eval-bar-v-fill {
   position: absolute;
-  inset: 0;
-  background-color: #333;
-}
-
-.eval-bar-white-side {
-  position: absolute;
-  top: 0;
-  bottom: 0;
+  left: 0;
   right: 0;
   background-color: #e8e8e8;
-  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: height 0.6s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.eval-bar-label {
+.eval-bar-v-label {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.85rem;
+  writing-mode: vertical-rl;
+  font-size: 0.78rem;
   font-weight: 700;
   pointer-events: none;
   z-index: 1;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Board toolbar */
+.board-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.toolbar-cluster {
+  display: flex;
+  gap: 8px;
+}
+
+.toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  background-color: #444;
+  margin: 2px 8px;
+}
+
+.icon-btn {
+  flex: none;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Moves panel (live game score) */
+.moves-panel {
+  background-color: #1f1f1f;
+  border: 1px solid #333;
+  border-radius: 8px;
+  max-height: 140px;
+  flex: none;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+
+.moves-panel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  align-items: center;
+}
+
+.moves-panel-num {
+  color: #888;
+  font-size: 0.85rem;
+  margin-right: 2px;
+}
+
+.moves-panel-chip {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #ddd;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 0.9rem;
+}
+
+.moves-panel-chip:hover {
+  background-color: #333;
+}
+
+.moves-chip-current,
+.moves-chip-current:hover {
+  background-color: #3a5a8a;
+  color: #fff;
+}
+
+.moves-panel-empty {
+  font-style: italic;
+  color: #888;
+  text-align: center;
+  font-size: 0.85rem;
+  padding: 8px 0;
+}
+
+/* Report entry section (play view) — reports are the app's main value,
+   so this block leads the side column. */
+.report-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: none;
+}
+
+.report-entry-btn {
+  width: 100%;
+  justify-content: center;
+  padding: 12px;
+}
+
+/* The primary action of the app — subtle accent border to stand out */
+.report-entry-btn:first-child {
+  border-color: rgba(122, 179, 255, 0.45);
+}
+
+/* ═══ Dedicated report view ═══ */
+
+.report-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 1180px;
+}
+
+.report-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.report-header .action-button {
+  flex: none;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+}
+
+.report-header-title {
+  color: #eee;
+  font-size: 0.95rem;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.report-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.report-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 520px;
+}
+
+.report-moves-scroll {
+  overflow-y: auto;
+  max-height: calc(100vh - 300px);
+  padding-right: 6px;
+}
+
+.report-empty-note {
+  font-style: italic;
+  color: #888;
+  text-align: center;
+  margin-top: 12px;
+}
+
+/* ═══ Shared modal bits ═══ */
+
+.modal-title {
+  margin: 0 0 16px 0;
+  font-size: 1.05rem;
+  color: #fff;
+}
+
+.modal-subtitle {
+  margin: 0 0 12px 0;
+  font-size: 0.85rem;
+  color: #aaa;
+}
+
+.modal-primary-btn {
+  width: 100%;
+  margin-top: 16px;
+  padding: 10px;
+  justify-content: center;
+}
+
+.modal-hint {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: #666;
+  text-align: center;
+}
+
+.import-textarea {
+  width: 100%;
+  min-height: 140px;
+  resize: vertical;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #555;
+  background-color: #1e1e1e;
+  color: #ddd;
+  font-family: monospace;
+  font-size: 0.85rem;
+  box-sizing: border-box;
+}
+
+.import-feedback {
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+
+.import-feedback.ok {
+  color: #4ade80;
+}
+
+.import-feedback.err {
+  color: #ff6b6b;
+}
+
+/* Saved reports library */
+.saved-reports-search {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background-color: #1e1e1e;
+  color: #ddd;
+  font-size: 0.85rem;
+}
+
+.saved-reports-sort {
+  padding: 8px 6px;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background-color: #1e1e1e;
+  color: #ddd;
+  font-size: 0.85rem;
+}
+
+.saved-reports-empty {
+  font-style: italic;
+  color: #888;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.saved-reports-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.saved-report-title {
+  font-size: 0.88rem;
+  color: #eee;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-report-subtitle {
+  color: #777;
+  font-size: 0.78rem;
+  margin-left: 8px;
+}
+
+.saved-report-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.saved-reports-rename {
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #555;
+  background-color: #1e1e1e;
+  color: #eee;
+  font-size: 0.88rem;
+  margin-bottom: 4px;
+  box-sizing: border-box;
+}
+
+.sri-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.sri-btn {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+}
+
+/* ⋯ overflow menu */
+.menu-wrap {
+  position: relative;
+}
+
+.menu-popup {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  z-index: 30;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+}
+
+.menu-popup button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: #ddd;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.menu-popup button:hover {
+  background-color: #3a3a3a;
+}
+
+.menu-popup button.danger {
+  color: #ff6b6b;
+}
+
+/* Shortcuts modal */
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  color: #ccc;
+}
+
+.shortcuts-table td {
+  padding: 7px 6px;
+  border-bottom: 1px solid #333;
+}
+
+.shortcuts-table tr:last-child td {
+  border-bottom: none;
+}
+
+.shortcuts-table kbd {
+  background-color: #1e1e1e;
+  border: 1px solid #555;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #eee;
 }
 
 /* API Key Settings */
@@ -506,25 +905,6 @@ button {
   gap: 10px;
 }
 
-/* Small × on the Report tab to close an open report */
-.tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 6px;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  font-size: 14px;
-  line-height: 1;
-  color: #888;
-  transition: background 0.12s, color 0.12s;
-}
-.tab-close:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #ddd;
-}
-
 .report-summary {
   padding: 10px 14px;
   background-color: rgba(122, 179, 255, 0.08);
@@ -592,17 +972,34 @@ button {
   border: 1px solid rgba(74, 222, 128, 0.3);
 }
 
-.badge-critical,
-.badge-brilliant {
+.badge-critical {
   background: rgba(34, 211, 238, 0.15);
   color: #22d3ee;
   border: 1px solid rgba(34, 211, 238, 0.3);
 }
 
+.badge-brilliant {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.badge-trap {
+  background: rgba(244, 114, 182, 0.15);
+  color: #f472b6;
+  border: 1px solid rgba(244, 114, 182, 0.3);
+}
+
+.badge-capitalized {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+
 .badge-opportunity {
-  background-color: rgba(167, 139, 250, 0.15);
-  color: #a78bfa;
-  border: 1px solid rgba(167, 139, 250, 0.3);
+  background-color: rgba(196, 181, 253, 0.18);
+  color: #c4b5fd;
+  border: 1px solid rgba(196, 181, 253, 0.4);
 }
 
 .badge-golden_opportunity {
@@ -804,7 +1201,10 @@ button {
 /* ═══ Tab Panel ═══ */
 
 .tab-panel {
-  height: 820px;
+  /* Fill whatever vertical space the board area leaves in the side
+     column; the tab content scrolls internally. */
+  flex: 1;
+  min-height: 0;
   border: 1px solid #444;
   border-radius: 12px;
   display: flex;
@@ -854,13 +1254,30 @@ button {
   color: #fff !important;
 }
 
-.saved-indicator {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background-color: #4ade80;
-  display: inline-block;
-  flex-shrink: 0;
+.tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+.coach-message {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: #ccc;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.coach-message-empty {
+  font-style: italic;
+}
+
+.lines-empty {
+  font-style: italic;
+  color: #888;
+  text-align: center;
+  margin-top: 20px;
 }
 
 .tab-content {
