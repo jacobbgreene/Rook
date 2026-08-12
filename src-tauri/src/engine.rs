@@ -81,11 +81,8 @@ pub fn calculate_worker_config(resources: &SystemResources) -> WorkerPoolConfig 
     let num_workers = (available_cores / threads_per_worker).max(1);
 
     let available_ram_mb = (resources.total_ram_mb / 10) as usize;
-    let hash_mb_per_worker = if num_workers > 0 {
-        (available_ram_mb / num_workers).clamp(64, 128)
-    } else {
-        64
-    };
+    // num_workers is clamped to >= 1 above, so this division is safe.
+    let hash_mb_per_worker = (available_ram_mb / num_workers).clamp(64, 128);
 
     WorkerPoolConfig {
         num_workers,
@@ -135,6 +132,13 @@ pub fn find_stockfish_path() -> Result<String, String> {
 // ═══════════════════════════════════════════════════════════════
 // Stockfish Worker — manages a single child process
 // ═══════════════════════════════════════════════════════════════
+
+/// Per-MultiPV-slot search state: (depth, score_cp, score_mate, pv).
+type LineData = (u32, Option<i32>, Option<i32>, Vec<String>);
+
+/// Handshake/option negotiation timeout.  A healthy engine answers in
+/// well under a second; 30s only fires when something is truly stuck.
+const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 
 struct StockfishWorker {
     child: tokio::process::Child,
@@ -203,7 +207,7 @@ impl StockfishWorker {
 
         // ── UCI handshake ───────────────────────────────────────
         worker.send("uci").await?;
-        worker.wait_for("uciok").await?;
+        worker.wait_for("uciok", HANDSHAKE_TIMEOUT_SECS).await?;
 
         // ── Engine options ──────────────────────────────────────
         worker
@@ -223,7 +227,7 @@ impl StockfishWorker {
             .await?;
 
         worker.send("isready").await?;
-        worker.wait_for("readyok").await?;
+        worker.wait_for("readyok", HANDSHAKE_TIMEOUT_SECS).await?;
 
         Ok(worker)
     }
@@ -241,23 +245,35 @@ impl StockfishWorker {
         Ok(())
     }
 
-    /// Block until the engine emits a line exactly equal to `target`.
-    async fn wait_for(&mut self, target: &str) -> Result<(), String> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = self
-                .reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| format!("Stockfish read error: {}", e))?;
-            if n == 0 {
-                return Err("Stockfish process terminated unexpectedly".to_string());
+    /// Block until the engine emits a line exactly equal to `target`,
+    /// giving up after `timeout_secs` so a hung engine can't stall the
+    /// whole analysis run forever.
+    async fn wait_for(&mut self, target: &str, timeout_secs: u64) -> Result<(), String> {
+        let wait = async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = self
+                    .reader
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|e| format!("Stockfish read error: {}", e))?;
+                if n == 0 {
+                    return Err("Stockfish process terminated unexpectedly".to_string());
+                }
+                if line.trim() == target {
+                    return Ok(());
+                }
             }
-            if line.trim() == target {
-                return Ok(());
-            }
-        }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait)
+            .await
+            .map_err(|_| {
+                format!(
+                    "Stockfish timed out waiting for '{}' after {}s",
+                    target, timeout_secs
+                )
+            })?
     }
 
     /// Evaluate a single FEN position to the given depth with MultiPV lines.
@@ -270,7 +286,7 @@ impl StockfishWorker {
         // Flush any stale state from a previous search
         self.send("stop").await?;
         self.send("isready").await?;
-        self.wait_for("readyok").await?;
+        self.wait_for("readyok", HANDSHAKE_TIMEOUT_SECS).await?;
 
         // Configure and kick off the search
         self.send(&format!("setoption name MultiPV value {}", multipv))
@@ -280,17 +296,31 @@ impl StockfishWorker {
 
         // Collect info lines, keyed by MultiPV index.
         // For each multipv slot we keep only the deepest info line.
-        let mut lines: HashMap<u32, (u32, Option<i32>, Option<i32>, Vec<String>)> =
-            HashMap::new();
+        let mut lines: HashMap<u32, LineData> = HashMap::new();
         let mut buf = String::new();
+
+        // Generous per-position budget: scales with depth so a hung engine
+        // fails the batch with an error instead of stalling it forever.
+        let search_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(60 + u64::from(depth) * 5);
 
         loop {
             buf.clear();
-            let n = self
-                .reader
-                .read_line(&mut buf)
-                .await
-                .map_err(|e| format!("Stockfish read error: {}", e))?;
+            let read = tokio::time::timeout_at(
+                search_deadline,
+                self.reader.read_line(&mut buf),
+            )
+            .await;
+            let n = match read {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => return Err(format!("Stockfish read error: {}", e)),
+                Err(_) => {
+                    return Err(format!(
+                        "Stockfish search timed out (depth {}) — engine may be hung",
+                        depth
+                    ))
+                }
+            };
             if n == 0 {
                 return Err("Stockfish process terminated during analysis".to_string());
             }
@@ -311,8 +341,9 @@ impl StockfishWorker {
 
                     // Accept if we have a score (terminal positions may lack a PV)
                     if score_cp.is_some() || score_mate.is_some() || !pv.is_empty() {
-                        let dominated =
-                            lines.get(&mpv).map_or(true, |(existing_d, _, _, _)| d > *existing_d);
+                        let dominated = lines
+                            .get(&mpv)
+                            .is_none_or(|(existing_d, _, _, _)| d > *existing_d);
                         if dominated {
                             lines.insert(mpv, (d, score_cp, score_mate, pv));
                         }
@@ -408,7 +439,7 @@ fn distribute_work<T>(items: Vec<T>, n: usize) -> Vec<Vec<T>> {
     if n == 0 || items.is_empty() {
         return vec![items];
     }
-    let chunk_size = (items.len() + n - 1) / n;
+    let chunk_size = items.len().div_ceil(n);
     let mut chunks = Vec::with_capacity(n);
     let mut iter = items.into_iter().peekable();
     while iter.peek().is_some() {
@@ -439,6 +470,13 @@ pub async fn run_engine_pass(
         return Ok(Vec::new());
     }
 
+    // Validate all FENs up front — a malformed position sent to Stockfish
+    // would otherwise fail opaquely mid-batch (or worse, hang a worker).
+    for (i, fen) in positions.iter().enumerate() {
+        crate::live_engine::validate_fen(fen)
+            .map_err(|e| format!("Invalid position #{}: {}", i + 1, e))?;
+    }
+
     let resources = detect_system_resources();
     let config = calculate_worker_config(&resources);
 
@@ -449,31 +487,42 @@ pub async fn run_engine_pass(
     let chunks = distribute_work(indexed, actual_workers);
 
     // Spawn one async task per Stockfish worker
-    let mut handles = Vec::with_capacity(actual_workers);
+    let mut tasks = futures_util::stream::FuturesUnordered::new();
 
     for chunk in chunks {
         let sf_path = stockfish_path.to_string();
         let completed = completed.clone();
 
-        let handle = tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let mut worker = StockfishWorker::spawn(&config, &sf_path).await?;
             let results = worker.evaluate_batch(&chunk, depth, multipv, &completed).await;
             worker.quit().await;
             results
-        });
-
-        handles.push(handle);
+        }));
     }
 
-    // Await all workers and merge results
+    // Await workers as they complete and merge results.  On the first
+    // failure, abort the remaining workers immediately (the worker's Drop
+    // impl kills the Stockfish child process) instead of letting them run
+    // on detached.
     let mut all_results: Vec<(usize, PositionEval)> = Vec::new();
 
-    for handle in handles {
-        let batch = handle
-            .await
-            .map_err(|e| format!("Worker task panicked: {}", e))?
-            .map_err(|e: String| e)?;
-        all_results.extend(batch);
+    while let Some(joined) = futures_util::StreamExt::next(&mut tasks).await {
+        match joined {
+            Ok(Ok(batch)) => all_results.extend(batch),
+            Ok(Err(e)) => {
+                for task in tasks.iter() {
+                    task.abort();
+                }
+                return Err(e);
+            }
+            Err(e) => {
+                for task in tasks.iter() {
+                    task.abort();
+                }
+                return Err(format!("Worker task panicked: {}", e));
+            }
+        }
     }
 
     // Restore original position ordering

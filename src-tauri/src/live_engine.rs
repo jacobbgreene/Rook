@@ -92,7 +92,7 @@ impl LiveEngineHandle {
 // FEN Validation
 // ═══════════════════════════════════════════════════════════════
 
-fn validate_fen(fen: &str) -> Result<(), String> {
+pub(crate) fn validate_fen(fen: &str) -> Result<(), String> {
     let parsed: Fen = fen
         .parse()
         .map_err(|e: shakmaty::fen::ParseFenError| format!("Invalid FEN: {}", e))?;
@@ -106,11 +106,17 @@ fn validate_fen(fen: &str) -> Result<(), String> {
 // Resource Configuration
 // ═══════════════════════════════════════════════════════════════
 
-fn live_engine_config() -> (usize, usize) {
+struct LiveEngineConfig {
+    hash_mb: usize,
+    threads: usize,
+}
+
+fn live_engine_config() -> LiveEngineConfig {
     let res = detect_system_resources();
-    let threads = (res.logical_cores / 2).max(1);
-    let hash_mb = ((res.total_ram_mb as usize * 2) / 100).clamp(64, 512);
-    (hash_mb, threads)
+    LiveEngineConfig {
+        threads: (res.logical_cores / 2).max(1),
+        hash_mb: ((res.total_ram_mb as usize * 2) / 100).clamp(64, 512),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -198,10 +204,14 @@ async fn live_engine_task(
     mut rx: mpsc::Receiver<EngineCommand>,
     stockfish_path: &str,
 ) -> Result<(), String> {
-    let (hash_mb, threads) = live_engine_config();
+    let config = live_engine_config();
 
     // ── Spawn Stockfish ───────────────────────────────────────
     let mut cmd = Command::new(stockfish_path);
+    // Backstop for app exit: if the process handle is dropped without a
+    // graceful "quit" (e.g. the runtime tears the task down), kill the
+    // engine rather than leaking a busy process.
+    cmd.kill_on_drop(true);
 
     #[cfg(unix)]
     unsafe {
@@ -248,12 +258,12 @@ async fn live_engine_task(
 
     send(
         &mut writer,
-        &format!("setoption name Threads value {}", threads),
+        &format!("setoption name Threads value {}", config.threads),
     )
     .await?;
     send(
         &mut writer,
-        &format!("setoption name Hash value {}", hash_mb),
+        &format!("setoption name Hash value {}", config.hash_mb),
     )
     .await?;
     send(&mut writer, "setoption name Use NNUE value true").await?;
@@ -314,14 +324,18 @@ async fn live_engine_task(
 
             // ── Searching: read stdout + receive commands ─────
             State::Searching => {
-                buf.clear();
                 tokio::select! {
                     result = reader.read_line(&mut buf) => {
                         let n = result.map_err(|e| format!("Stockfish read error: {}", e))?;
                         if n == 0 {
                             return Err("Stockfish process terminated unexpectedly".to_string());
                         }
-                        let line = buf.trim();
+                        // NB: `buf` is cleared only after processing, never
+                        // before the select — if the command branch wins while
+                        // a line is half-read, the partial bytes must stay in
+                        // `buf` so the next read completes the line.
+                        let line = buf.trim().to_string();
+                        buf.clear();
 
                         if line.starts_with("bestmove") {
                             state = State::Idle;
@@ -330,11 +344,11 @@ async fn live_engine_task(
                                 fen: current_fen.clone(),
                             });
                         } else if line.starts_with("info depth") && !line.contains("currmove") {
-                            if let Some(depth) = extract_u32(line, " depth ") {
-                                let multipv = extract_u32(line, " multipv ").unwrap_or(1);
-                                let score_cp = extract_i32(line, " score cp ");
-                                let score_mate = extract_i32(line, " score mate ");
-                                let pv_uci_all = extract_pv(line);
+                            if let Some(depth) = extract_u32(&line, " depth ") {
+                                let multipv = extract_u32(&line, " multipv ").unwrap_or(1);
+                                let score_cp = extract_i32(&line, " score cp ");
+                                let score_mate = extract_i32(&line, " score mate ");
+                                let pv_uci_all = extract_pv(&line);
 
                                 if score_cp.is_some() || score_mate.is_some() {
                                     let pv_uci: Vec<String> =
@@ -391,14 +405,16 @@ async fn live_engine_task(
 
             // ── Draining: wait for bestmove, then act ─────────
             State::Draining => {
-                buf.clear();
                 tokio::select! {
                     result = reader.read_line(&mut buf) => {
                         let n = result.map_err(|e| format!("Stockfish read error: {}", e))?;
                         if n == 0 {
                             return Err("Stockfish process terminated unexpectedly".to_string());
                         }
-                        let line = buf.trim();
+                        // Same partial-line discipline as Searching: clear
+                        // only after the completed line has been consumed.
+                        let line = buf.trim().to_string();
+                        buf.clear();
 
                         if line.starts_with("bestmove") {
                             match pending.take() {
@@ -504,18 +520,23 @@ async fn wait_for(
     reader: &mut BufReader<tokio::process::ChildStdout>,
     target: &str,
 ) -> Result<(), String> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Stockfish read error: {}", e))?;
-        if n == 0 {
-            return Err("Stockfish process terminated unexpectedly".to_string());
+    let wait = async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("Stockfish read error: {}", e))?;
+            if n == 0 {
+                return Err("Stockfish process terminated unexpectedly".to_string());
+            }
+            if line.trim() == target {
+                return Ok(());
+            }
         }
-        if line.trim() == target {
-            return Ok(());
-        }
-    }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+        .await
+        .map_err(|_| format!("Stockfish timed out waiting for '{}'", target))?
 }
