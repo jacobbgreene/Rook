@@ -109,6 +109,8 @@ export interface SavedReport {
   /** PGN Result header ("1-0"/"0-1"/"1/2-1/2") — the only place a
       resignation/timeout is recorded, so it must survive save/load. */
   pgnResult?: string | null;
+  /** PGN Termination header (e.g. "rdinho73 won by resignation"). */
+  termination?: string | null;
   report: GameAnalysisReport;
   gameHistory: string[];
   evaluations?: PositionEval[];
@@ -875,6 +877,7 @@ export async function runFullAnalysis(
   includeOpportunities: boolean = false,
   pgnResult?: string,
   isCancelled?: () => boolean,
+  pgnTermination?: string,
   // Reported as soon as classification finishes (engine pass + probing) —
   // drives the moment toasts that pop up by the eval bar during analysis.
   onMomentsClassified?: (moments: CriticalMoment[]) => void,
@@ -1097,6 +1100,7 @@ export async function runFullAnalysis(
         includeGreatMoves,
         includeOpportunities,
         gameResult,
+        termination: pgnTermination ?? null,
       });
     } catch (e) {
       thematicSummary = `Summary unavailable: ${e}`;

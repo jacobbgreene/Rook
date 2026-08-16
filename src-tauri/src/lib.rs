@@ -367,14 +367,19 @@ fn build_critical_moment_prompt(
     }
 }
 
-fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str, include_opportunities: bool) -> String {
+fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str, include_opportunities: bool, termination: Option<&str>) -> String {
     let opponent = if perspective == "white" { "black" } else { "white" };
 
-    let result_context = match game_result {
-        "win" => format!("The {} player won this game.", perspective),
-        "loss" => format!("The {} player lost this game.", perspective),
-        "draw" => "The game ended in a draw.".to_string(),
-        _ => "The game outcome is not determined (may have been resigned or abandoned).".to_string(),
+    // The PGN Termination header (e.g. "rdinho73 won by resignation") is
+    // ground truth when present — prefer it over the mapped result.
+    let result_context = match (game_result, termination) {
+        (_, Some(t)) if !t.is_empty() => format!("Game ended: {}.", t),
+        ("win", _) => format!("The {} player won this game.", perspective),
+        ("loss", _) => format!("The {} player lost this game.", perspective),
+        ("draw", _) => "The game ended in a draw.".to_string(),
+        _ => "The game result was not recorded. Do NOT mention the result or \
+              its absence at all — focus the summary entirely on the play."
+            .to_string(),
     };
 
     let mut prompt = format!(
@@ -569,6 +574,9 @@ struct SavedReport {
     /// timeout win, so it must persist with the report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pgn_result: Option<String>,
+    /// PGN Termination header (e.g. "rdinho73 won by resignation").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    termination: Option<String>,
     report: GameAnalysisReportData,
     game_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -860,6 +868,7 @@ async fn generate_thematic_summary(
     include_great_moves: Option<bool>,
     include_opportunities: Option<bool>,
     game_result: Option<String>,
+    termination: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let (_, gemini_key, openai_key, anthropic_key) = resolve_api_keys(&state.api_keys)?;
@@ -869,7 +878,7 @@ async fn generate_thematic_summary(
     }
 
     let result_str = game_result.as_deref().unwrap_or("unknown");
-    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false));
+    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false), termination.as_deref());
 
     llm_prompt(COACH_SYSTEM_PROMPT, &prompt, &state).await
 }

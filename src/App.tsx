@@ -106,6 +106,11 @@ function App() {
     white?: string;
     black?: string;
   }>({});
+  // PGN Termination header (e.g. "rdinho73 won by resignation") — ground
+  // truth for how the game ended, fed to the summary prompt.
+  const [pgnTermination, setPgnTermination] = useState<string | undefined>(
+    undefined,
+  );
 
   // Refs that always reflect the latest values — prevents stale closures
   // in handlePositionChange from starting the live engine after async gaps.
@@ -437,6 +442,7 @@ function App() {
     sanList: string[];
     perspective: "white" | "black";
     pgnResult?: string;
+    pgnTermination?: string;
   }) => {
     if (isPostGameLoading) return;
     // If a report is active, the board may be showing a variation — always
@@ -447,11 +453,12 @@ function App() {
       override?.sanList ?? mainLineSansRef.current ?? gameSanList;
     const perspective = override?.perspective ?? reportPerspective;
     let pgnRes = override?.pgnResult ?? pgnResult;
+    let termination = override?.pgnTermination ?? pgnTermination;
 
     // Safety net: if no result is in scope (e.g. app restarted since the
     // PGN import), inherit it from an existing saved report of this game.
     // Without this, a resignation/timeout silently degrades to "unknown".
-    if (!pgnRes) {
+    if (!pgnRes || !termination) {
       const existingMeta = await invoke<SavedReportMeta | null>(
         "check_report_exists",
         { gameHash: computeGameHash(history) },
@@ -460,7 +467,8 @@ function App() {
         const prev = await invoke<SavedReport>("load_report", {
           id: existingMeta.id,
         }).catch(() => null);
-        if (prev?.pgnResult) pgnRes = prev.pgnResult;
+        if (prev?.pgnResult && !pgnRes) pgnRes = prev.pgnResult;
+        if (prev?.termination && !termination) termination = prev.termination;
       }
     }
 
@@ -502,6 +510,7 @@ function App() {
         includeOpportunities,
         pgnRes,
         () => analysisCancelledRef.current,
+        termination,
         (moments) => {
           if (gen !== reportGenRef.current) return;
           setClassifiedMoments(
@@ -552,6 +561,7 @@ function App() {
         whitePlayer: playerNames.white ?? null,
         blackPlayer: playerNames.black ?? null,
         pgnResult: pgnRes ?? null,
+        termination: termination ?? null,
         report,
         gameHistory: [...history],
         evaluations,
@@ -700,6 +710,8 @@ function App() {
     setSavedReportId(null);
     setSavedReportMeta(null);
     setPlayerNames({});
+    setPgnResult(undefined);
+    setPgnTermination(undefined);
     variationEvalsRef.current.clear();
     variationReturnIdxRef.current = null;
     setGame(newGame);
@@ -751,6 +763,7 @@ function App() {
       // player names for report titles.
       const headers = newGame.header();
       setPgnResult(headers.Result || undefined);
+      setPgnTermination(headers.Termination || undefined);
       setPlayerNames({
         white: headers.White ?? undefined,
         black: headers.Black ?? undefined,
@@ -777,6 +790,7 @@ function App() {
     } else {
       // It was a single FEN position
       setPgnResult(undefined);
+      setPgnTermination(undefined);
       setPlayerNames({});
       setGameHistory([newGame.fen()]);
       setGameSanList([]);
@@ -1270,6 +1284,7 @@ function App() {
       // Restore the PGN result (resignations/timeouts) and player names so
       // titles and any future regenerate keep them.
       setPgnResult(saved.pgnResult ?? undefined);
+      setPgnTermination(saved.termination ?? undefined);
       setPlayerNames({
         white: saved.whitePlayer ?? undefined,
         black: saved.blackPlayer ?? undefined,
@@ -1320,6 +1335,7 @@ function App() {
         sanList: sans,
         perspective: saved.perspective,
         pgnResult,
+        pgnTermination: saved.termination ?? undefined,
       });
     } catch (e) {
       console.error("Failed to regenerate report:", e);
