@@ -367,7 +367,7 @@ fn build_critical_moment_prompt(
     }
 }
 
-fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &str, include_great_moves: bool, game_result: &str, include_opportunities: bool, termination: Option<&str>) -> String {
+fn build_thematic_summary_prompt(moments: &[CriticalMomentData], san_moves: &[String], perspective: &str, include_great_moves: bool, game_result: &str, include_opportunities: bool, termination: Option<&str>) -> String {
     let opponent = if perspective == "white" { "black" } else { "white" };
 
     // The PGN Termination header (e.g. "rdinho73 won by resignation") is
@@ -449,11 +449,22 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
             );
         } else {
             prompt += &format!(
-                "- Move {} ({}): Played {}, best was {}. Category: {}, eval drop: {:.1} pawns.{}\n",
-                m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_drop, wdl_str,
+                "- Move {} ({}): Played {}, best was {}. Category: {}, eval before: {:.2}, eval after: {:.2} (drop: {:.1} pawns).{}\n",
+                m.move_number, whose, m.move_san, m.best_move_san, m.category, m.eval_before, m.eval_after, m.eval_drop, wdl_str,
             );
         }
     }
+
+    // Full game score, so move references are grounded in visible data
+    // rather than reconstructed from the moments list.
+    if !san_moves.is_empty() {
+        prompt += &format!("\nFull game moves:\n{}\n", san_moves.join(" "));
+    }
+
+    prompt += "\nWhen writing the summary, follow this procedure exactly:\n\
+        1. Select the 2-3 patterns that cover the largest total eval drop in the moment list.\n\
+        2. For each pattern, cite only moves from the moment list, quoting move numbers, SANs, and eval figures verbatim.\n\
+        3. State the engine's best move exactly as given in the data when discussing what should have been played.\n";
 
     let opp_instruction = if include_opportunities {
         "\n- Comment on whether you capitalized on the opportunities your opponent gave you, or if you missed chances to seize the advantage"
@@ -864,6 +875,7 @@ async fn explain_critical_moment(
 #[tauri::command]
 async fn generate_thematic_summary(
     moments: Vec<CriticalMomentData>,
+    san_moves: Option<Vec<String>>,
     perspective: String,
     include_great_moves: Option<bool>,
     include_opportunities: Option<bool>,
@@ -877,8 +889,11 @@ async fn generate_thematic_summary(
         return Err("No API key configured.".to_string());
     }
 
+    // Bound the move list — it goes straight into the prompt.
+    let san_moves: Vec<String> = san_moves.unwrap_or_default().into_iter().take(500).collect();
+
     let result_str = game_result.as_deref().unwrap_or("unknown");
-    let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false), termination.as_deref());
+    let prompt = build_thematic_summary_prompt(&moments, &san_moves, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false), termination.as_deref());
 
     llm_prompt(COACH_SYSTEM_PROMPT, &prompt, &state).await
 }

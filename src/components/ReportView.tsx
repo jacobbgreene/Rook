@@ -373,14 +373,44 @@ export function ReportView(props: ReportViewProps) {
   navigateRef.current = onNavigateToMainLineMove;
 
   // Clicking a move chip in the summary/explanations jumps to that move on
-  // the board. Repeated SANs resolve to the first occurrence. Ref-based so
-  // the memoized move list below never captures a stale move list.
+  // the board. Moves that were never played (engine suggestions like the
+  // cxd5 the summary keeps recommending) jump to the critical moment where
+  // they were the best move. Ref-based so the memoized move list below
+  // never captures a stale move list.
   const sanMovesRef = useRef<string[]>([]);
   sanMovesRef.current = mainLineSanMoves || gameSanList;
+  // A SAN resolves to a moment if it's the best move, the bait, or appears
+  // anywhere in the moment's best line or trap refutation.
+  const findMomentForSan = (san: string) =>
+    report?.criticalMoments.find(
+      (m) =>
+        m.bestMoveSan === san ||
+        m.baitMoveSan === san ||
+        m.bestLine?.includes(san) ||
+        m.refutationLine?.includes(san),
+    );
   const navigateToSan = (san: string) => {
     const idx = sanMovesRef.current.findIndex((s) => s === san);
-    if (idx >= 0) navigateRef.current(idx + 1);
+    if (idx >= 0) {
+      navigateRef.current(idx + 1);
+      return;
+    }
+    const moment = findMomentForSan(san);
+    if (moment) {
+      // If the SAN is a move inside the moment's best line, play the line
+      // out to that move on the board — much clearer than just landing on
+      // the starting position of the line.
+      const lineIdx = moment.bestLine?.indexOf(san) ?? -1;
+      if (lineIdx >= 0) {
+        playBestLineRef.current(moment.fen, moment.bestLine, lineIdx);
+        return;
+      }
+      const fi = gameHistory.indexOf(moment.fen);
+      if (fi >= 0) navigateRef.current(fi);
+    }
   };
+  const canNavigateSan = (san: string) =>
+    sanMovesRef.current.includes(san) || !!findMomentForSan(san);
 
   // Moment toasts: during the LLM phase the progress event carries the FEN
   // of the moment currently being explained — the toast for that moment
@@ -580,7 +610,7 @@ export function ReportView(props: ReportViewProps) {
                 </div>
               )}
             <div className="cm-explanation">
-              <ChessMarkdown onMoveClick={navigateToSan}>
+                <ChessMarkdown onMoveClick={navigateToSan} canNavigate={canNavigateSan}>
                 {stripLatex(moment.llmExplanation)}
               </ChessMarkdown>
             </div>
@@ -710,7 +740,8 @@ export function ReportView(props: ReportViewProps) {
                 of competing with the move browser for side-column height. */}
             {!isLoading && report && (
               <div className="report-summary report-summary-board">
-                <ChessMarkdown onMoveClick={navigateToSan}>
+                <div className="summary-pane-header">Coach Summary</div>
+                <ChessMarkdown onMoveClick={navigateToSan} canNavigate={canNavigateSan}>
                   {stripLatex(report.thematicSummary)}
                 </ChessMarkdown>
               </div>

@@ -953,19 +953,81 @@ button {
   border-radius: 12px;
   box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
   padding: 14px 18px;
-  color: #d4d4d4;
-  font-size: 0.9rem;
-  line-height: 1.65;
+  color: #dedede;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.summary-pane-header {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7ab3ff;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #333;
 }
 
 /* Comfortable prose measure */
 .report-summary-board p {
   max-width: 68ch;
-  margin: 0 0 0.7em 0;
+  margin: 0 0 0.75em 0;
 }
 
 .report-summary-board p:last-child {
   margin-bottom: 0;
+}
+
+.report-summary-board strong {
+  color: #fff;
+}
+
+/* Numbered lessons ("Three things to carry forward") as cards */
+.report-summary-board ol {
+  list-style: none;
+  counter-reset: lesson;
+  padding: 0;
+  margin: 10px 0 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.report-summary-board ol li {
+  counter-increment: lesson;
+  background-color: #21252b;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 12px 10px 40px;
+  position: relative;
+}
+
+.report-summary-board ol li::before {
+  content: counter(lesson);
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: rgba(122, 179, 255, 0.15);
+  color: #7ab3ff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Eval figures in markdown text (1.41 → 0.69) */
+.md-eval {
+  font-family: monospace;
+  font-size: 0.85em;
+  color: #9ec5ff;
+  background-color: rgba(122, 179, 255, 0.08);
+  padding: 0 3px;
+  border-radius: 3px;
 }
 
 /* Clickable SAN chips inside markdown (summary, explanations) */

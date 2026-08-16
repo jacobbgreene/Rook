@@ -1096,6 +1096,7 @@ export async function runFullAnalysis(
     try {
       thematicSummary = await invoke<string>("generate_thematic_summary", {
         moments: momentsForSummary,
+        sanMoves,
         perspective,
         includeGreatMoves,
         includeOpportunities,

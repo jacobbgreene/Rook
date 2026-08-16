@@ -33,7 +33,10 @@ There is no test suite yet. Gates: `npx tsc --noEmit`, `npm run build`,
   persistence. `engine.rs` (batch worker pool), `lc0_engine.rs` (Lc0 session:
   WDL pass + policy probe), `lc0_config.rs` (discovery/download).
 - `src-tauri/src/prompts/chess-coach.md` — the coach system prompt, compiled
-  in via `include_str!`. Edit the markdown, not a string literal.
+  in via `include_str!`. Edit the markdown, not a string literal. Its
+  "Ground Truth Rules" section (RFC 2119 keywords) is what keeps the LLM a
+  translation layer over precomputed engine facts — keep those rules intact
+  when editing the prompt.
 
 ## Conventions (follow these)
 
