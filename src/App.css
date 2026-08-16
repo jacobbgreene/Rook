@@ -1,7 +1,7 @@
 :root {
   /* Single source of truth for board sizing — the side column height is
      derived from this so the columns always line up. */
-  --board-size: 560px;
+  --board-size: 620px;
 
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -158,6 +158,14 @@ button {
   border-color: #fff;
 }
 
+/* Best-lines pane: chips scaled down a notch so a full line fits inside
+   the pane's fixed third of the window without cut-off. Scoped so the
+   moves panel and report view keep the roomier chip size. */
+.tab-pane .move-chip {
+  font-size: 0.78rem;
+  padding: 2px 6px;
+}
+
 /* ═══ App layout ═══ */
 
 .app-header {
@@ -234,8 +242,11 @@ button {
   position: absolute;
   left: 0;
   right: 0;
+  top: 0;
+  bottom: 0;
   background-color: #e8e8e8;
-  transition: height 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
 }
 
 .eval-bar-v-label {
@@ -437,7 +448,7 @@ button {
 
 .modal-hint {
   margin-top: 8px;
-  font-size: 0.75rem;
+  font-size: 0.82rem;
   color: #666;
   text-align: center;
 }
@@ -523,7 +534,7 @@ button {
   display: flex;
   gap: 8px;
   align-items: center;
-  font-size: 0.75rem;
+  font-size: 0.82rem;
   color: #888;
 }
 
@@ -815,7 +826,7 @@ button {
 }
 
 .model-toggle-desc {
-  font-size: 0.75rem;
+  font-size: 0.82rem;
   color: #888;
 }
 
@@ -934,7 +945,7 @@ button {
 }
 
 .category-badge {
-  font-size: 0.7rem;
+  font-size: 0.77rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -1057,7 +1068,7 @@ button {
 
 .best-line-arrow {
   color: #444;
-  font-size: 0.65rem;
+  font-size: 0.79rem;
 }
 
 .cm-explanation {
@@ -1355,7 +1366,7 @@ button {
 .perspective-badge {
   padding: 1px 6px;
   border-radius: 3px;
-  font-size: 0.7rem;
+  font-size: 0.77rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -1374,7 +1385,7 @@ button {
 .result-badge {
   padding: 1px 6px;
   border-radius: 3px;
-  font-size: 0.7rem;
+  font-size: 0.77rem;
   font-weight: 700;
   letter-spacing: 0.03em;
 }
@@ -1487,7 +1498,7 @@ button {
 }
 
 .engine-choice-note {
-  font-size: 0.72rem;
+  font-size: 0.79rem;
   color: #666;
   margin-top: 4px;
 }
@@ -1568,7 +1579,7 @@ button {
   margin-left: 8px;
   padding: 1px 7px;
   border-radius: 4px;
-  font-size: 0.75rem;
+  font-size: 0.82rem;
   font-weight: 600;
   letter-spacing: 0.03em;
   background: rgba(255, 255, 255, 0.08);
@@ -1581,7 +1592,7 @@ button {
 
 /* Warning shown when Lc0 falls back to CPU */
 .lc0-cpu-warning {
-  font-size: 0.75rem;
+  font-size: 0.82rem;
   color: #fbbf24;
   margin-bottom: 4px;
 }

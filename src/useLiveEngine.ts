@@ -42,40 +42,57 @@ export function useLiveEngine() {
   const lastFireTime = useRef(0);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Batching: accumulate engine-line updates and flush once per frame
+  // Batching: accumulate engine-line updates and flush on a throttle
   const pendingThoughts = useRef<Record<number, EngineThought>>({});
   const pendingEval = useRef<string | null>(null);
-  const rafHandle = useRef<number | null>(null);
+  const rafHandle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // When analysis restarts (new position / widen pass), the displayed lines
+  // stay on screen until the first flush of new lines REPLACES them
+  // wholesale. This avoids the panes blanking out between moves.
+  const replaceOnFlush = useRef(false);
 
   const DEBOUNCE_MS = 200;
   const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
 
+  // Throttle UI updates to ~10 Hz. Per-frame flushing re-rendered the whole
+  // App tree (including the board) at up to 60 fps, which caused visible
+  // jank while dragging pieces. The eval bar's CSS transition smooths the
+  // 10 Hz updates, so nothing looks less fluid.
+  const FLUSH_MS = 100;
+
   const scheduleFlush = useCallback(() => {
     if (rafHandle.current !== null) return;
-    rafHandle.current = requestAnimationFrame(() => {
+    rafHandle.current = setTimeout(() => {
       rafHandle.current = null;
       const thoughts = pendingThoughts.current;
       const evalStr = pendingEval.current;
       if (Object.keys(thoughts).length > 0) {
-        setEngineThoughts((prev) => {
-          const merged = { ...prev };
-          for (const key of Object.keys(thoughts)) {
-            const k = Number(key);
-            const incoming = thoughts[k];
-            const existing = merged[k];
-            if (!existing || incoming.depth >= existing.depth) {
-              merged[k] = incoming;
+        if (replaceOnFlush.current) {
+          // First lines for a fresh analysis: swap in whole, don't merge
+          // (stale lines may have higher depth and would win the merge).
+          setEngineThoughts(thoughts);
+          replaceOnFlush.current = false;
+        } else {
+          setEngineThoughts((prev) => {
+            const merged = { ...prev };
+            for (const key of Object.keys(thoughts)) {
+              const k = Number(key);
+              const incoming = thoughts[k];
+              const existing = merged[k];
+              if (!existing || incoming.depth >= existing.depth) {
+                merged[k] = incoming;
+              }
             }
-          }
-          return merged;
-        });
+            return merged;
+          });
+        }
         pendingThoughts.current = {};
       }
       if (evalStr !== null) {
         setEvaluation(evalStr);
         pendingEval.current = null;
       }
-    });
+    }, FLUSH_MS);
   }, []);
 
   // ── Reset idle timer ────────────────────────────────────────
@@ -95,11 +112,12 @@ export function useLiveEngine() {
       pendingThoughts.current = {};
       pendingEval.current = null;
       if (rafHandle.current !== null) {
-        cancelAnimationFrame(rafHandle.current);
+        clearTimeout(rafHandle.current);
         rafHandle.current = null;
       }
-      setEngineThoughts({});
-      setEvaluation("");
+      // Keep the previous position's lines/eval displayed until the new
+      // ones stream in — clearing here made the panes vanish on every move.
+      replaceOnFlush.current = true;
       invoke("live_engine_set_fen", { fen }).catch(() => {});
       resetIdleTimer();
     },
@@ -139,7 +157,7 @@ export function useLiveEngine() {
     pendingThoughts.current = {};
     pendingEval.current = null;
     if (rafHandle.current !== null) {
-      cancelAnimationFrame(rafHandle.current);
+      clearTimeout(rafHandle.current);
       rafHandle.current = null;
     }
     setEngineThoughts({});
@@ -200,9 +218,11 @@ export function useLiveEngine() {
         (event) => {
           if (!mounted) return;
           if (event.payload.status === "phase2") {
-            // Clear thoughts for fresh widen pass
+            // Fresh widen pass: new lines replace the old ones wholesale
+            // (they restart at lower depth), but keep the old lines on
+            // screen until the replacements arrive.
             pendingThoughts.current = {};
-            setEngineThoughts({});
+            replaceOnFlush.current = true;
           }
         },
       );
@@ -230,7 +250,7 @@ export function useLiveEngine() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
       if (idleTimer.current) clearTimeout(idleTimer.current);
-      if (rafHandle.current !== null) cancelAnimationFrame(rafHandle.current);
+      if (rafHandle.current !== null) clearTimeout(rafHandle.current);
     };
   }, [resetIdleTimer, scheduleFlush]);
 

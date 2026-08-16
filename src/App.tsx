@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Chess } from "chess.js";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -43,6 +43,10 @@ interface Arrow {
   endSquare: string;
   color: string;
 }
+
+// Shared empty array so the board's `arrows` prop keeps a stable identity
+// on the starting position (avoids re-rendering all squares per frame).
+const EMPTY_ARROWS: Arrow[] = [];
 
 function App() {
   const [game, setGame] = useState(new Chess());
@@ -580,6 +584,17 @@ function App() {
     return move;
   }
 
+  // Stable callback identity for the board: onDrop closes over fresh state
+  // every render, so route through a ref. Without this, MemoChessboard
+  // re-renders (all 64 squares) on every engine eval flush.
+  const onDropRef = useRef(onDrop);
+  onDropRef.current = onDrop;
+  const stableOnDrop = useCallback(
+    (args: { sourceSquare: string; targetSquare: string | null }) =>
+      onDropRef.current(args),
+    [],
+  );
+
   const navigateToMove = (historyIndex: number) => {
     if (historyIndex < 0 || historyIndex >= gameHistory.length) return;
     handlePositionChange(gameHistory[historyIndex]);
@@ -905,7 +920,7 @@ function App() {
     return parseFloat(s) || 0;
   };
 
-  const bestMoveArrows = Object.values(engineThoughts)
+  const bestMoveArrows = useMemo(() => Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
     .slice(0, 5)
     .reduce<Arrow[]>((arrows, thought) => {
@@ -935,7 +950,12 @@ function App() {
       arrows.push({ startSquare, endSquare, color });
       return arrows;
     }, [])
-    .reverse();
+    .reverse(), [engineThoughts]);
+
+  // Derived once per game state instead of on every engine flush render.
+  const currentFen = useMemo(() => game.fen(), [game]);
+  const sideToMove = useMemo(() => game.turn(), [game]);
+  const isCheckmate = useMemo(() => game.isCheckmate(), [game]);
 
   const displayThoughts = Object.values(engineThoughts)
     .sort((a, b) => a.multipv - b.multipv)
@@ -1351,14 +1371,14 @@ function App() {
       ) : (
         <div className="play-layout">
           <BoardSection
-            fen={game.fen()}
+            fen={currentFen}
             boardOrientation={boardOrientation}
-            arrows={currentMoveIndex === 0 ? [] : bestMoveArrows}
+            arrows={currentMoveIndex === 0 ? EMPTY_ARROWS : bestMoveArrows}
             squareStyles={moveHighlightSquares}
-            onPieceDrop={onDrop}
+            onPieceDrop={stableOnDrop}
             evaluation={evaluation}
-            sideToMove={game.turn()}
-            isCheckmate={game.isCheckmate()}
+            sideToMove={sideToMove}
+            isCheckmate={isCheckmate}
             hasGame={currentMoveIndex > 0}
             canNavigateBack={currentMoveIndex > 0}
             canNavigateForward={currentMoveIndex < gameHistory.length - 1}
@@ -1504,7 +1524,8 @@ function App() {
                         flexDirection: "column",
                         gap: "10px",
                         flex: 1,
-                        overflowY: "auto",
+                        minHeight: 0,
+                        overflow: "hidden",
                       }}
                     >
                       {displayThoughts.length === 0 && (
@@ -1535,10 +1556,17 @@ function App() {
                               backgroundColor: style.bg,
                               border: `1px solid ${style.border}`,
                               borderRadius: "6px",
-                              padding: "10px",
+                              padding: "8px",
                               display: "flex",
                               flexDirection: "column",
-                              gap: "6px",
+                              gap: "5px",
+                              // Each line pane takes an equal, static share
+                              // of the pane height; long lines scroll
+                              // internally instead of pushing siblings
+                              // (e.g. the orange line 3) past the window.
+                              flex: "1 1 0",
+                              minHeight: 0,
+                              overflowY: "auto",
                             }}
                           >
                             <div
@@ -1564,7 +1592,7 @@ function App() {
                               style={{
                                 display: "flex",
                                 flexWrap: "wrap",
-                                gap: "6px",
+                                gap: "4px",
                               }}
                             >
                               {thought.moves.map((san, i) => {

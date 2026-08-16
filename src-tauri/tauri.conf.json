@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Rook",
-        "width": 1160,
-        "height": 780,
-        "minWidth": 1080,
-        "minHeight": 700
+        "width": 1280,
+        "height": 840,
+        "minWidth": 1180,
+        "minHeight": 760
       }
     ],
     "security": {

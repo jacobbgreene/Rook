@@ -1,7 +1,12 @@
 // The board column shared by play view and report view:
 // vertical eval bar pinned to the board's exact height, board, toolbar.
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import { Chessboard } from "react-chessboard";
+
+// Memoized so engine-eval updates (which only affect EvalBar) don't
+// re-render the board — react-chessboard v5 re-renders all 64 squares on
+// every render, which causes jank mid-drag.
+const MemoChessboard = memo(Chessboard);
 import { EvalBar } from "./EvalBar";
 import { BoardToolbar } from "./BoardToolbar";
 
@@ -58,6 +63,19 @@ export function BoardSection({
   onReset,
   children,
 }: BoardSectionProps) {
+  // Stable identity across renders: MemoChessboard only re-renders when one
+  // of these inputs actually changes (not on every engine eval flush).
+  const options = useMemo(
+    () => ({
+      position: fen,
+      onPieceDrop,
+      arrows,
+      boardOrientation,
+      animationDurationInMs: 120,
+      squareStyles,
+    }),
+    [fen, onPieceDrop, arrows, boardOrientation, squareStyles],
+  );
   return (
     <div className="board-col">
       <div className="board-row">
@@ -69,16 +87,7 @@ export function BoardSection({
           hasGame={hasGame}
         />
         <div className="board-wrap">
-          <Chessboard
-            options={{
-              position: fen,
-              onPieceDrop,
-              arrows,
-              boardOrientation,
-              animationDurationInMs: 120,
-              squareStyles,
-            }}
-          />
+          <MemoChessboard options={options} />
         </div>
       </div>
       <BoardToolbar

@@ -69,11 +69,11 @@ export function EvalBar({
       <div
         className="eval-bar-v-fill"
         style={{
-          height: `${percent}%`,
+          // scaleY instead of height: composited on the GPU, no layout
+          // reflow of .board-row on every streamed eval update.
+          transform: `scaleY(${percent / 100})`,
           // The side you view as fills from the bottom.
-          ...(boardOrientation === "white"
-            ? { bottom: 0, top: "auto" }
-            : { top: 0, bottom: "auto" }),
+          transformOrigin: boardOrientation === "white" ? "bottom" : "top",
         }}
       />
       <div className="eval-bar-v-label" style={{ color: labelColor }}>
