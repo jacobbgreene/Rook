@@ -9,6 +9,7 @@ import {
   SavedReportMeta,
   computeGameHash,
   determineGameResult,
+  ANALYSIS_CANCELLED,
   moveInfoAt,
   uciToSan,
   PositionEval,
@@ -82,6 +83,11 @@ function App() {
   const [postGameReport, setPostGameReport] =
     useState<GameAnalysisReport | null>(null);
   const [isPostGameLoading, setIsPostGameLoading] = useState(false);
+  // Moments classified during the current report run — drives the little
+  // "Trap!"/"Blunder" toasts by the eval bar while analysis runs.
+  const [classifiedMoments, setClassifiedMoments] = useState<
+    { moveNumber: number; side: string; category: string; moveSan: string; fen: string }[]
+  >([]);
   const [analysisProgress, setAnalysisProgress] =
     useState<AnalysisPhase | null>(null);
   const [showReportSetup, setShowReportSetup] = useState(false);
@@ -95,6 +101,11 @@ function App() {
   const [detailedReport, setDetailedReport] = useState(true);
   const [includeOpportunities, setIncludeOpportunities] = useState(false);
   const [pgnResult, setPgnResult] = useState<string | undefined>(undefined);
+  // Player names from PGN headers (White/Black tags), used for report titles.
+  const [playerNames, setPlayerNames] = useState<{
+    white?: string;
+    black?: string;
+  }>({});
 
   // Refs that always reflect the latest values — prevents stale closures
   // in handlePositionChange from starting the live engine after async gaps.
@@ -118,6 +129,18 @@ function App() {
   // Bumped whenever a report run starts or is dismissed, so a stale async
   // analysis can't write its results into a newer/closed report session.
   const reportGenRef = useRef(0);
+  const analysisCancelledRef = useRef(false);
+
+  // Abort an in-progress report: stop the orchestration loop, signal the
+  // backend engine pool, and reset to the default startup view.
+  const cancelReportGeneration = () => {
+    analysisCancelledRef.current = true;
+    reportGenRef.current++; // invalidate the in-flight run
+    invoke("cancel_analysis").catch(() => {});
+    setIsPostGameLoading(false);
+    setAnalysisProgress(null);
+    void resetBoard();
+  };
 
   const setReportEvaluations = (v: PositionEval[] | null) => {
     reportEvalsRef.current = v;
@@ -179,13 +202,12 @@ function App() {
     }
   };
 
-  const handleToggleGeminiPro = async () => {
-    const newValue = !apiKeyStatus?.gemini_pro_enabled;
+  const handleSelectModel = async (model: string) => {
     try {
-      await invoke("set_gemini_pro", { enabled: newValue });
+      await invoke("set_analysis_model", { model });
       await loadApiKeys();
     } catch (e) {
-      console.error("Failed to toggle Gemini Pro:", e);
+      console.error("Failed to set analysis model:", e);
     }
   };
 
@@ -424,9 +446,27 @@ function App() {
     const sanList =
       override?.sanList ?? mainLineSansRef.current ?? gameSanList;
     const perspective = override?.perspective ?? reportPerspective;
-    const pgnRes = override?.pgnResult ?? pgnResult;
+    let pgnRes = override?.pgnResult ?? pgnResult;
+
+    // Safety net: if no result is in scope (e.g. app restarted since the
+    // PGN import), inherit it from an existing saved report of this game.
+    // Without this, a resignation/timeout silently degrades to "unknown".
+    if (!pgnRes) {
+      const existingMeta = await invoke<SavedReportMeta | null>(
+        "check_report_exists",
+        { gameHash: computeGameHash(history) },
+      ).catch(() => null);
+      if (existingMeta) {
+        const prev = await invoke<SavedReport>("load_report", {
+          id: existingMeta.id,
+        }).catch(() => null);
+        if (prev?.pgnResult) pgnRes = prev.pgnResult;
+      }
+    }
 
     const gen = ++reportGenRef.current;
+    analysisCancelledRef.current = false;
+    setClassifiedMoments([]);
     setIsPostGameLoading(true);
     setActiveTabTracked("report");
     setPostGameReport(null);
@@ -461,6 +501,19 @@ function App() {
         detailedReport,
         includeOpportunities,
         pgnRes,
+        () => analysisCancelledRef.current,
+        (moments) => {
+          if (gen !== reportGenRef.current) return;
+          setClassifiedMoments(
+            moments.map((m) => ({
+              moveNumber: m.moveNumber,
+              side: m.side,
+              category: m.category,
+              moveSan: m.moveSan,
+              fen: m.fen,
+            })),
+          );
+        },
       );
       // The report was closed or re-started while analysing — discard.
       if (gen !== reportGenRef.current) return;
@@ -496,6 +549,9 @@ function App() {
         moveCount: sanList.length,
         openingMoves,
         result,
+        whitePlayer: playerNames.white ?? null,
+        blackPlayer: playerNames.black ?? null,
+        pgnResult: pgnRes ?? null,
         report,
         gameHistory: [...history],
         evaluations,
@@ -512,9 +568,16 @@ function App() {
         openingMoves,
         criticalMomentCount: report.criticalMoments.length,
         result,
+        whitePlayer: playerNames.white ?? null,
+        blackPlayer: playerNames.black ?? null,
       });
     } catch (error) {
-      if (gen === reportGenRef.current) {
+      // A user-initiated cancel isn't a failure — cancelReportGeneration
+      // already reset the UI.
+      const cancelled =
+        analysisCancelledRef.current ||
+        String(error).includes(ANALYSIS_CANCELLED);
+      if (!cancelled && gen === reportGenRef.current) {
         setPostGameReport({
           criticalMoments: [],
           thematicSummary: `Analysis failed: ${error}`,
@@ -636,6 +699,7 @@ function App() {
     setShowReportSetup(false);
     setSavedReportId(null);
     setSavedReportMeta(null);
+    setPlayerNames({});
     variationEvalsRef.current.clear();
     variationReturnIdxRef.current = null;
     setGame(newGame);
@@ -683,9 +747,14 @@ function App() {
 
     let feedbackText: string;
     if (isPgn) {
-      // Extract PGN Result header (e.g. "1-0", "0-1", "1/2-1/2")
+      // Extract PGN Result header (e.g. "1-0", "0-1", "1/2-1/2") and
+      // player names for report titles.
       const headers = newGame.header();
       setPgnResult(headers.Result || undefined);
+      setPlayerNames({
+        white: headers.White ?? undefined,
+        black: headers.Black ?? undefined,
+      });
 
       // Reconstruct the full timeline history if a PGN was imported.
       // Respect SetUp/FEN headers: games starting from a custom position
@@ -708,6 +777,7 @@ function App() {
     } else {
       // It was a single FEN position
       setPgnResult(undefined);
+      setPlayerNames({});
       setGameHistory([newGame.fen()]);
       setGameSanList([]);
       setCurrentMoveIndex(0);
@@ -952,6 +1022,22 @@ function App() {
     }, [])
     .reverse(), [engineThoughts]);
 
+  // Content-stable identity: engineThoughts gets a new object on every
+  // 10 Hz flush, which would otherwise churn the memoized board's options.
+  // The signature must include colors — they're score-dependent (the
+  // blunder-arrow rule flips when the best line crosses +1.0).
+  const arrowsSignature = (arrows: Arrow[]) =>
+    arrows.map((a) => `${a.startSquare}${a.endSquare}${a.color}`).join("|");
+  const stableArrowsRef = useRef<{ sig: string; arrows: Arrow[] }>({
+    sig: "",
+    arrows: EMPTY_ARROWS,
+  });
+  const sig = arrowsSignature(bestMoveArrows);
+  if (sig !== stableArrowsRef.current.sig) {
+    stableArrowsRef.current = { sig, arrows: bestMoveArrows };
+  }
+  const stableBestMoveArrows = stableArrowsRef.current.arrows;
+
   // Derived once per game state instead of on every engine flush render.
   const currentFen = useMemo(() => game.fen(), [game]);
   const sideToMove = useMemo(() => game.turn(), [game]);
@@ -1181,6 +1267,13 @@ function App() {
       const sans = saved.gameSanList || reconstructSansFromHistory(saved.gameHistory);
       setGameHistory(saved.gameHistory);
       setGameSanList(sans);
+      // Restore the PGN result (resignations/timeouts) and player names so
+      // titles and any future regenerate keep them.
+      setPgnResult(saved.pgnResult ?? undefined);
+      setPlayerNames({
+        white: saved.whitePlayer ?? undefined,
+        black: saved.blackPlayer ?? undefined,
+      });
       setMainLineHistoryTracked(saved.gameHistory, sans);
       setReportPerspective(saved.perspective);
       setBoardOrientation(saved.perspective);
@@ -1207,9 +1300,11 @@ function App() {
           ? saved.gameSanList
           : reconstructSansFromHistory(saved.gameHistory);
       setShowSavedReportsModal(false);
-      // Map the stored result back to a PGN-style result for the summary
+      // Prefer the persisted PGN result (records resignations/timeouts);
+      // fall back to mapping the stored win/loss/draw for older reports.
       const pgnResult =
-        saved.result === "win"
+        saved.pgnResult ??
+        (saved.result === "win"
           ? saved.perspective === "white"
             ? "1-0"
             : "0-1"
@@ -1219,7 +1314,7 @@ function App() {
               : "1-0"
             : saved.result === "draw"
               ? "1/2-1/2"
-              : undefined;
+              : undefined);
       await requestPostGameReport({
         history: saved.gameHistory,
         sanList: sans,
@@ -1274,6 +1369,9 @@ function App() {
   // Exit report mode but keep the report session in memory.
   const exitReportToGame = () => {
     setActiveTabTracked("analysis");
+    // The report page is taller than the play view — don't carry its
+    // scroll offset back, or the right column appears shifted/clipped.
+    window.scrollTo(0, 0);
     if (gameHistory.length > 0) {
       handlePositionChange(gameHistory[currentMoveIndex]);
     }
@@ -1303,11 +1401,17 @@ function App() {
   }
 
   const reportMode = activeTab === "report";
+  // Title: player names when known (from PGN headers or the saved report),
+  // else fall back to the opening moves.
+  const reportWhite = playerNames.white ?? savedReportMeta?.whitePlayer;
+  const reportBlack = playerNames.black ?? savedReportMeta?.blackPlayer;
   const reportTitle =
-    savedReportMeta?.openingMoves ||
-    (gameSanList.length > 0
-      ? buildPgn(gameSanList.slice(0, 6), gameHistory[0])
-      : "Game report");
+    reportWhite || reportBlack
+      ? `${reportWhite ?? "White"} – ${reportBlack ?? "Black"}`
+      : savedReportMeta?.openingMoves ||
+        (gameSanList.length > 0
+          ? buildPgn(gameSanList.slice(0, 6), gameHistory[0])
+          : "Game report");
 
   return (
     <main className="container">
@@ -1333,12 +1437,21 @@ function App() {
 
       {reportMode ? (
         <ReportView
-          fen={game.fen()}
+          // While generating, the board follows the analysis head (engine
+          // sweep / moment being explained) instead of the navigation state.
+          fen={
+            isPostGameLoading &&
+            analysisProgress &&
+            "fen" in analysisProgress &&
+            analysisProgress.fen
+              ? analysisProgress.fen
+              : game.fen()
+          }
           boardOrientation={boardOrientation}
-          arrows={bestMoveArrows}
+          arrows={isPostGameLoading ? EMPTY_ARROWS : stableBestMoveArrows}
           squareStyles={moveHighlightSquares}
-          onPieceDrop={onDrop}
-          evaluation={evaluation}
+          onPieceDrop={stableOnDrop}
+          evaluation={isPostGameLoading ? "" : evaluation}
           sideToMove={game.turn()}
           isCheckmate={game.isCheckmate()}
           currentMoveIndex={currentMoveIndex}
@@ -1351,12 +1464,16 @@ function App() {
           title={reportTitle}
           perspective={reportPerspective}
           result={savedReportMeta?.result}
+          whitePlayer={reportWhite ?? null}
+          blackPlayer={reportBlack ?? null}
           onExitToGame={exitReportToGame}
           onCloseReport={closeReport}
           onRegenerate={() => requestPostGameReport()}
+          onCancelAnalysis={cancelReportGeneration}
           onOpenLibrary={openSavedReportsModal}
           isLoading={isPostGameLoading}
           analysisProgress={analysisProgress}
+          classifiedMoments={classifiedMoments}
           report={postGameReport}
           reportPerspective={reportPerspective}
           mainLineHistory={mainLineHistory}
@@ -1373,7 +1490,7 @@ function App() {
           <BoardSection
             fen={currentFen}
             boardOrientation={boardOrientation}
-            arrows={currentMoveIndex === 0 ? EMPTY_ARROWS : bestMoveArrows}
+            arrows={currentMoveIndex === 0 ? EMPTY_ARROWS : stableBestMoveArrows}
             squareStyles={moveHighlightSquares}
             onPieceDrop={stableOnDrop}
             evaluation={evaluation}
@@ -1674,7 +1791,7 @@ function App() {
           apiKeyStatus={apiKeyStatus}
           onSaveKey={handleSaveKey}
           onRemoveKey={handleRemoveKey}
-          onToggleGeminiPro={handleToggleGeminiPro}
+          onSelectModel={handleSelectModel}
           appConfig={appConfig}
           onToggleEngineMode={handleToggleEngineMode}
           reportSettings={reportSettings}

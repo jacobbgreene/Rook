@@ -26,8 +26,9 @@ There is no test suite yet. Gates: `npx tsc --noEmit`, `npm run build`,
   Icons in `src/icons.tsx`, spring animations in `src/animate.tsx`.
 - `src/gameAnalysis.ts` — the report pipeline and critical-moment taxonomy
   (pure logic, no Tauri types leak in except `invoke`/`listen` calls).
-- `src/useLiveEngine.ts` — live engine hook (debounce, rAF batching,
-  idle-stop). Talks to `src-tauri/src/live_engine.rs` (persistent Stockfish).
+- `src/useLiveEngine.ts` — live engine hook (debounce, 10 Hz throttled
+  flush, idle-stop, stale-while-revalidate for line panes). Talks to
+  `src-tauri/src/live_engine.rs` (persistent Stockfish).
 - `src-tauri/src/lib.rs` — all Tauri commands, LLM integration, report
   persistence. `engine.rs` (batch worker pool), `lc0_engine.rs` (Lc0 session:
   WDL pass + policy probe), `lc0_config.rs` (discovery/download).
@@ -45,8 +46,15 @@ There is no test suite yet. Gates: `npx tsc --noEmit`, `npm run build`,
 - **Engine processes**: every stdout read has a timeout; children get
   `kill_on_drop(true)` or an explicit quit path. Never let a search hang the
   app or leak a process.
-- **API keys**: written via `save_keys_to_disk` (0600 on Unix); never log
-  them; `resolve_api_keys` handles in-app key → env var fallback.
+- **API keys / models**: written via `save_keys_to_disk` (0600 on Unix);
+  never log them; `resolve_api_keys` handles in-app key → env var fallback.
+  All LLM calls go through `llm_prompt` in lib.rs, which dispatches on the
+  user-selected `analysis_model` via `provider_for_model` (the model
+  catalog). Providers: anthropic / gemini / openai. The catalog is mirrored
+  in `ANALYSIS_MODELS` in `src/components/SettingsModal.tsx` — add new
+  models in BOTH places. Default model: `DEFAULT_ANALYSIS_MODEL` (Gemini
+  Flash — only provider with a free tier). `use_gemini_pro` in api_keys.json
+  is legacy, migrated by `ApiKeys::effective_model`.
 - **Animations**: animejs `spring({ bounce: 0.4, duration: 500 })` via
   `PopIn`/`bouncy` from `src/animate.tsx` — only for discrete mount events
   (modals, cards, view entrances). Never on continuously-updating surfaces

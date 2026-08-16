@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -380,9 +380,13 @@ impl StockfishWorker {
         depth: u32,
         multipv: u32,
         completed: &Arc<AtomicUsize>,
+        cancel: &Arc<AtomicBool>,
     ) -> Result<Vec<(usize, PositionEval)>, String> {
         let mut results = Vec::with_capacity(chunk.len());
         for (idx, fen) in chunk {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Analysis cancelled".to_string());
+            }
             let eval = self.evaluate_position(fen, depth, multipv).await?;
             results.push((*idx, eval));
             completed.fetch_add(1, Ordering::Relaxed);
@@ -465,6 +469,7 @@ pub async fn run_engine_pass(
     multipv: u32,
     stockfish_path: &str,
     completed: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<Vec<PositionEval>, String> {
     if positions.is_empty() {
         return Ok(Vec::new());
@@ -493,9 +498,10 @@ pub async fn run_engine_pass(
         let sf_path = stockfish_path.to_string();
         let completed = completed.clone();
 
+        let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut worker = StockfishWorker::spawn(&config, &sf_path).await?;
-            let results = worker.evaluate_batch(&chunk, depth, multipv, &completed).await;
+            let results = worker.evaluate_batch(&chunk, depth, multipv, &completed, &cancel).await;
             worker.quit().await;
             results
         }));

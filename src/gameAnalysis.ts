@@ -83,9 +83,9 @@ export interface GameAnalysisReport {
 }
 
 export type AnalysisPhase =
-  | { phase: "engine"; current: number; total: number }
+  | { phase: "engine"; current: number; total: number; fen?: string }
   | { phase: "lc0"; current: number; total: number; backend?: string }
-  | { phase: "llm"; current: number; total: number }
+  | { phase: "llm"; current: number; total: number; fen?: string }
   | { phase: "summary" }
   | { phase: "complete" };
 
@@ -104,6 +104,11 @@ export interface SavedReport {
   openingMoves: string;
   result: GameResult;
   name?: string | null;
+  whitePlayer?: string | null;
+  blackPlayer?: string | null;
+  /** PGN Result header ("1-0"/"0-1"/"1/2-1/2") — the only place a
+      resignation/timeout is recorded, so it must survive save/load. */
+  pgnResult?: string | null;
   report: GameAnalysisReport;
   gameHistory: string[];
   evaluations?: PositionEval[];
@@ -120,6 +125,8 @@ export interface SavedReportMeta {
   criticalMomentCount: number;
   result: GameResult;
   name?: string | null;
+  whitePlayer?: string | null;
+  blackPlayer?: string | null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -855,6 +862,8 @@ export interface FullAnalysisResult {
   evaluations: PositionEval[];
 }
 
+export const ANALYSIS_CANCELLED = "Analysis cancelled";
+
 export async function runFullAnalysis(
   gameHistory: string[],
   perspective: string,
@@ -865,7 +874,17 @@ export async function runFullAnalysis(
   detailedReport: boolean = true,
   includeOpportunities: boolean = false,
   pgnResult?: string,
+  isCancelled?: () => boolean,
+  // Reported as soon as classification finishes (engine pass + probing) —
+  // drives the moment toasts that pop up by the eval bar during analysis.
+  onMomentsClassified?: (moments: CriticalMoment[]) => void,
 ): Promise<FullAnalysisResult> {
+  // Checked between pipeline steps — the backend engine pass has its own
+  // cancel flag (via cancel_analysis); this stops the orchestration layer
+  // from issuing further steps.
+  const throwIfCancelled = () => {
+    if (isCancelled?.()) throw new Error(ANALYSIS_CANCELLED);
+  };
   // Step 1 — Reconstruct SAN moves from the FEN history
   const sanMoves: string[] = [];
   for (let i = 0; i < gameHistory.length - 1; i++) {
@@ -894,14 +913,25 @@ export async function runFullAnalysis(
   // reduce Stockfish depth to speed up the tactial scan.  Cap at 15
   // to keep the pool fast while still catching tactical motifs.
   const sfDepth = hybridMode ? Math.min(depth, 15) : depth;
+  throwIfCancelled();
   const evaluations = await runEnginePass(
     gameHistory,
     sfDepth,
-    (current, total) => onProgress?.({ phase: "engine", current, total }),
+    // Include the FEN at the progress frontier so the board can "follow
+    // the analysis head" — the pieces sweep through the game as Stockfish
+    // works through it.
+    (current, total) =>
+      onProgress?.({
+        phase: "engine",
+        current,
+        total,
+        fen: gameHistory[Math.min(current, gameHistory.length - 1)],
+      }),
   );
 
   // Step 3 — Threshold filter: flag eval-swing moments and collect
   // candidates for trap / brilliant / critical classification.
+  throwIfCancelled();
   const { moments, candidates } = filterCriticalMoments(
     gameHistory,
     sanMoves,
@@ -983,7 +1013,12 @@ export async function runFullAnalysis(
     includeOpportunities,
   );
 
+  // Discovery feed: reveal the classified moments before the (slow) LLM
+  // explanation phase begins.
+  onMomentsClassified?.(criticalMoments);
+
   // Step 3.6 — Lc0 strategic pass (hybrid mode only)
+  throwIfCancelled();
   if (hybridMode) {
     const criticalFens = criticalMoments.map(m => m.fen);
     if (criticalFens.length > 0) {
@@ -1022,8 +1057,10 @@ export async function runFullAnalysis(
   const explained: CriticalMomentWithExplanation[] = [];
   const sessionLog: string[] = [];
   for (let i = 0; i < playerMoments.length; i++) {
-    onProgress?.({ phase: "llm", current: i + 1, total: playerMoments.length });
+    throwIfCancelled();
     const m = playerMoments[i];
+    // Board follows along: show the moment currently being explained.
+    onProgress?.({ phase: "llm", current: i + 1, total: playerMoments.length, fen: m.fen });
     try {
       const explanation = await invoke<string>("explain_critical_moment", {
         moment: momentToPayload(m),

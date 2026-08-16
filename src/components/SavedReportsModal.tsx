@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import type { SavedReportMeta } from "../gameAnalysis";
 import { DotsIcon } from "../icons";
 import { PopIn } from "../animate";
+import { Dropdown } from "./Dropdown";
 
 type SortKey = "newest" | "oldest" | "critical" | "result";
 
@@ -104,16 +105,18 @@ export function SavedReportsModal({
               onChange={(e) => setSearch(e.target.value)}
               className="saved-reports-search"
             />
-            <select
-              value={sort}
-              onChange={(e) => setSort(e.target.value as SortKey)}
-              className="saved-reports-sort"
-            >
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="critical">Most critical moments</option>
-              <option value="result">Result (W-D-L)</option>
-            </select>
+            <div className="saved-reports-sort">
+              <Dropdown
+                value={sort}
+                onChange={(v) => setSort(v as SortKey)}
+                options={[
+                  { value: "newest", label: "Newest" },
+                  { value: "oldest", label: "Oldest" },
+                  { value: "critical", label: "Most critical moments" },
+                  { value: "result", label: "Result (W-D-L)" },
+                ]}
+              />
+            </div>
           </div>
         )}
 

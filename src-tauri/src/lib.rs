@@ -3,7 +3,7 @@ mod lc0_config;
 mod lc0_engine;
 mod live_engine;
 
-use rig::providers::{openai, gemini};
+use rig::providers::{anthropic, openai, gemini};
 use rig::completion::Prompt;
 use rig::client::CompletionClient;
 use serde::{Deserialize, Serialize};
@@ -19,11 +19,35 @@ use tauri::{Emitter, Manager};
 /// `src-tauri/src/prompts/chess-coach.md`.
 const COACH_SYSTEM_PROMPT: &str = include_str!("prompts/chess-coach.md");
 
-const GEMINI_FLASH_MODEL: &str = "gemini-3-flash-preview";
+// Model IDs verified against provider docs (Aug 2026) — rig-core's bundled
+// constants lag behind, so these are literals. Recheck occasionally; a
+// retired ID surfaces as a provider 404.
+const GEMINI_FLASH_MODEL: &str = "gemini-3.7-flash";
+const GEMINI_FLASH_LITE_MODEL: &str = "gemini-3.5-flash-lite";
 const GEMINI_PRO_MODEL: &str = "gemini-3.1-pro-preview";
 
-fn gemini_model(use_pro: bool) -> &'static str {
-    if use_pro { GEMINI_PRO_MODEL } else { GEMINI_FLASH_MODEL }
+/// Default model for the coach and report pipeline: Gemini Flash — the only
+/// provider of the three with a genuine free tier (Google AI Studio key).
+const DEFAULT_ANALYSIS_MODEL: &str = GEMINI_FLASH_MODEL;
+
+/// Model catalog: (model id, provider). The settings UI mirrors this list —
+/// keep the two in sync.
+fn provider_for_model(model: &str) -> Option<&'static str> {
+    const CATALOG: &[(&str, &str)] = &[
+        ("claude-haiku-4-5", "anthropic"),
+        ("claude-sonnet-5", "anthropic"),
+        ("claude-opus-5", "anthropic"),
+        (GEMINI_FLASH_MODEL, "gemini"),
+        (GEMINI_FLASH_LITE_MODEL, "gemini"),
+        (GEMINI_PRO_MODEL, "gemini"),
+        ("gpt-5.6-luna", "openai"),
+        ("gpt-5.6-terra", "openai"),
+        ("gpt-5.6-sol", "openai"),
+    ];
+    CATALOG
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, provider)| *provider)
 }
 
 // ── Context-Injection Pipeline types ──────────────────────────
@@ -434,22 +458,26 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
 
     if include_great_moves {
         prompt += &format!(
-            "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
+            "\nProvide a brief personalized summary for the {} player:\n\
             - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
             - Note any strong moves or sound tactical/positional decisions the player made\n\
             - If there were mistakes, identify the key patterns to work on{}\n\
-            - Suggest one concrete area for improvement\n\
+            - Give 2-3 concrete principles or lessons to keep in mind for future games. \
+            Each lesson MUST reference the specific move from this game it applies to \
+            (in algebraic notation, e.g. \"after 12. Ng5\"), so the app can link it to the board\n\
             Keep the tone direct and factual — recognize good play without excessive praise.\n\
             Address the player directly as \"you\".",
             perspective, opp_instruction,
         );
     } else {
         prompt += &format!(
-            "\nProvide a brief (3-4 sentences) personalized summary for the {} player:\n\
+            "\nProvide a brief personalized summary for the {} player:\n\
             - Open with a brief, factual acknowledgment of the game result (congratulations on a win, or a frank but not discouraging note on a loss)\n\
             - Identify your most common types of errors and recurring patterns\n\
             - Note if you missed opportunities to capitalize on your opponent's mistakes{}\n\
-            - Suggest one specific, actionable area to focus on for improvement\n\
+            - Give 2-3 concrete principles or lessons to keep in mind for future games. \
+            Each lesson MUST reference the specific move from this game it applies to \
+            (in algebraic notation, e.g. \"after 12. Ng5\"), so the app can link it to the board\n\
             Address the player directly as \"you\".",
             perspective, opp_instruction,
         );
@@ -460,15 +488,17 @@ fn build_thematic_summary_prompt(moments: &[CriticalMomentData], perspective: &s
 
 // ── Key resolution helper ────────────────────────────────────
 
-/// Resolve (gemini_key, openai_key, use_gemini_pro).  User-configured keys
-/// take priority over the environment-variable fallbacks.
-fn resolve_api_keys(state: &Mutex<ApiKeys>) -> Result<(String, String, bool), String> {
+/// Resolve (analysis_model, gemini_key, openai_key, anthropic_key).
+/// User-configured keys take priority over environment-variable fallbacks.
+fn resolve_api_keys(state: &Mutex<ApiKeys>) -> Result<(String, String, String, String), String> {
     let keys = state.lock().map_err(|e| e.to_string())?;
     let gemini = keys.gemini_api_key.clone().unwrap_or_default();
     let openai = keys.openai_api_key.clone().unwrap_or_default();
+    let anthropic = keys.anthropic_api_key.clone().unwrap_or_default();
     let gemini = if gemini.is_empty() { env::var("GEMINI_API_KEY").unwrap_or_default() } else { gemini };
     let openai = if openai.is_empty() { env::var("OPENAI_API_KEY").unwrap_or_default() } else { openai };
-    Ok((gemini, openai, keys.use_gemini_pro))
+    let anthropic = if anthropic.is_empty() { env::var("ANTHROPIC_API_KEY").unwrap_or_default() } else { anthropic };
+    Ok((keys.effective_model(), gemini, openai, anthropic))
 }
 
 // ── Persistence ──────────────────────────────────────────────
@@ -478,13 +508,41 @@ struct ApiKeys {
     gemini_api_key: Option<String>,
     openai_api_key: Option<String>,
     #[serde(default)]
+    anthropic_api_key: Option<String>,
+    /// Selected analysis model. None on files written by older versions —
+    /// migrated in `effective_model` from the legacy use_gemini_pro flag.
+    #[serde(default)]
+    analysis_model: Option<String>,
+    /// Legacy: pre-model-picker "use Gemini Pro" toggle. Read-only, kept so
+    /// old api_keys.json files still parse and migrate.
+    #[serde(default)]
     use_gemini_pro: bool,
+}
+
+impl ApiKeys {
+    fn effective_model(&self) -> String {
+        if let Some(m) = &self.analysis_model {
+            // A saved model may have been retired by the provider — fall
+            // back to the default rather than erroring on every call.
+            if provider_for_model(m).is_some() {
+                return m.clone();
+            }
+        }
+        // Migration for key files written before the model picker existed.
+        if self.use_gemini_pro {
+            GEMINI_PRO_MODEL.to_string()
+        } else {
+            DEFAULT_ANALYSIS_MODEL.to_string()
+        }
+    }
 }
 
 struct AppState {
     api_keys: Mutex<ApiKeys>,
     live_engine: live_engine::LiveEngineHandle,
     config: Mutex<lc0_config::AppConfig>,
+    /// Set by `cancel_analysis`; engine passes check it between positions.
+    analysis_cancel: Arc<AtomicBool>,
 }
 
 // ── Report Persistence ───────────────────────────────────────
@@ -503,6 +561,14 @@ struct SavedReport {
     /// Optional user-assigned display name (e.g. "Club game vs. Alex").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    white_player: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    black_player: Option<String>,
+    /// PGN Result header ("1-0" etc.) — the only record of a resignation or
+    /// timeout win, so it must persist with the report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pgn_result: Option<String>,
     report: GameAnalysisReportData,
     game_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,6 +618,10 @@ struct SavedReportMeta {
     result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    white_player: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    black_player: Option<String>,
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -590,7 +660,9 @@ struct ApiKeyStatus {
     gemini_hint: String,
     openai_set: bool,
     openai_hint: String,
-    gemini_pro_enabled: bool,
+    anthropic_set: bool,
+    anthropic_hint: String,
+    analysis_model: String,
 }
 
 fn get_keys_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -646,7 +718,9 @@ fn get_api_keys(state: tauri::State<'_, AppState>) -> Result<ApiKeyStatus, Strin
         gemini_hint: make_hint(&keys.gemini_api_key),
         openai_set: keys.openai_api_key.is_some(),
         openai_hint: make_hint(&keys.openai_api_key),
-        gemini_pro_enabled: keys.use_gemini_pro,
+        anthropic_set: keys.anthropic_api_key.is_some(),
+        anthropic_hint: make_hint(&keys.anthropic_api_key),
+        analysis_model: keys.effective_model(),
     })
 }
 
@@ -656,6 +730,7 @@ fn save_api_key(provider: String, key: String, state: tauri::State<'_, AppState>
     match provider.as_str() {
         "gemini" => keys.gemini_api_key = Some(key),
         "openai" => keys.openai_api_key = Some(key),
+        "anthropic" => keys.anthropic_api_key = Some(key),
         _ => return Err(format!("Unknown provider: {}", provider)),
     }
     save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
@@ -668,6 +743,7 @@ fn remove_api_key(provider: String, state: tauri::State<'_, AppState>, app: taur
     match provider.as_str() {
         "gemini" => keys.gemini_api_key = None,
         "openai" => keys.openai_api_key = None,
+        "anthropic" => keys.anthropic_api_key = None,
         _ => return Err(format!("Unknown provider: {}", provider)),
     }
     save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
@@ -675,11 +751,62 @@ fn remove_api_key(provider: String, state: tauri::State<'_, AppState>, app: taur
 }
 
 #[tauri::command]
-fn set_gemini_pro(enabled: bool, state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+fn set_analysis_model(model: String, state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    if provider_for_model(&model).is_none() {
+        return Err(format!("Unknown analysis model: {}", model));
+    }
     let mut keys = state.api_keys.lock().map_err(|e| e.to_string())?;
-    keys.use_gemini_pro = enabled;
+    keys.analysis_model = Some(model);
     save_keys_to_disk(&get_keys_file_path(&app)?, &keys)?;
     Ok(())
+}
+
+/// Send a single prompt to the user's selected analysis model. Dispatches
+/// on the model's provider; errors clearly when that provider has no key
+/// (instead of silently falling back to another provider).
+async fn llm_prompt(
+    preamble: &str,
+    prompt_text: &str,
+    state: &AppState,
+) -> Result<String, String> {
+    let (model, gemini_key, openai_key, anthropic_key) = resolve_api_keys(&state.api_keys)?;
+    let provider = provider_for_model(&model)
+        .ok_or_else(|| format!("Unknown analysis model: {}", model))?;
+
+    match provider {
+        "anthropic" => {
+            if anthropic_key.is_empty() {
+                return Err("No Anthropic API key configured. Add one in Settings or pick a model from a provider you have a key for.".to_string());
+            }
+            let client = anthropic::Client::new(&anthropic_key)
+                .map_err(|e| format!("Failed to initialise Anthropic client: {}", e))?;
+            // Anthropic's API rejects requests without max_tokens.
+            let agent = client.agent(&model)
+                .preamble(preamble)
+                .max_tokens(4096)
+                .build();
+            agent.prompt(prompt_text).await.map_err(|e| format!("Claude Error: {}", e))
+        }
+        "gemini" => {
+            if gemini_key.is_empty() {
+                return Err("No Gemini API key configured. Add one in Settings or pick a model from a provider you have a key for.".to_string());
+            }
+            let client = gemini::Client::new(&gemini_key)
+                .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
+            let agent = client.agent(&model).preamble(preamble).build();
+            agent.prompt(prompt_text).await.map_err(|e| format!("Gemini Error: {}", e))
+        }
+        "openai" => {
+            if openai_key.is_empty() {
+                return Err("No OpenAI API key configured. Add one in Settings or pick a model from a provider you have a key for.".to_string());
+            }
+            let client = openai::Client::new(&openai_key)
+                .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
+            let agent = client.agent(&model).preamble(preamble).build();
+            agent.prompt(prompt_text).await.map_err(|e| format!("OpenAI Error: {}", e))
+        }
+        _ => Err(format!("Unknown provider for model: {}", model)),
+    }
 }
 
 #[tauri::command]
@@ -690,10 +817,10 @@ async fn explain_move(
     perspective: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
+    let (_, gemini_key, openai_key, anthropic_key) = resolve_api_keys(&state.api_keys)?;
 
-    if gemini_key.is_empty() && openai_key.is_empty() {
-        return Ok("No API key found. Click the key icon above to add your API key, or set the GEMINI_API_KEY environment variable for a free AI coach.".to_string());
+    if gemini_key.is_empty() && openai_key.is_empty() && anthropic_key.is_empty() {
+        return Ok("No API key found. Open Settings to add an API key for the model you've selected — engine analysis works fully without one.".to_string());
     }
 
     let preamble = format!("You are a grandmaster AI chess coach. The user is a beginner to intermediate player. They are currently playing from the perspective of {}. Using the provided current board state (FEN), Stockfish evaluation, and top projected lines, explain the position and tell the user *why* the top suggested move is a good idea. Keep it highly concise (2-3 sentences max), friendly, and instructional. Frame your advice specifically for the {} player.", perspective, perspective);
@@ -702,29 +829,7 @@ async fn explain_move(
         fen, evaluation, top_lines
     );
 
-    if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key)
-            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
-        let agent = client.agent(gemini_model(use_pro))
-            .preamble(&preamble)
-            .build();
-
-        match agent.prompt(&prompt_text).await {
-            Ok(response) => Ok(response),
-            Err(e) => Err(format!("Gemini Coaching Error: {}", e))
-        }
-    } else {
-        let client = openai::Client::new(&openai_key)
-            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
-        let agent = client.agent(openai::GPT_4O)
-            .preamble(&preamble)
-            .build();
-
-        match agent.prompt(&prompt_text).await {
-            Ok(response) => Ok(response),
-            Err(e) => Err(format!("OpenAI Coaching Error: {}", e))
-        }
-    }
+    llm_prompt(&preamble, &prompt_text, &state).await
 }
 
 // ── Context-Injection Pipeline commands ───────────────────────
@@ -736,30 +841,16 @@ async fn explain_critical_moment(
     session_log: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
+    let (_, gemini_key, openai_key, anthropic_key) = resolve_api_keys(&state.api_keys)?;
 
-    if gemini_key.is_empty() && openai_key.is_empty() {
+    if gemini_key.is_empty() && openai_key.is_empty() && anthropic_key.is_empty() {
         return Err("No API key configured.".to_string());
     }
 
     let prompt =
         build_critical_moment_prompt(&moment, &perspective, session_log.as_deref());
 
-    if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key)
-            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
-        let agent = client.agent(gemini_model(use_pro))
-            .preamble(COACH_SYSTEM_PROMPT)
-            .build();
-        agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
-    } else {
-        let client = openai::Client::new(&openai_key)
-            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
-        let agent = client.agent(openai::GPT_4O)
-            .preamble(COACH_SYSTEM_PROMPT)
-            .build();
-        agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
-    }
+    llm_prompt(COACH_SYSTEM_PROMPT, &prompt, &state).await
 }
 
 #[tauri::command]
@@ -771,30 +862,16 @@ async fn generate_thematic_summary(
     game_result: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (gemini_key, openai_key, use_pro) = resolve_api_keys(&state.api_keys)?;
+    let (_, gemini_key, openai_key, anthropic_key) = resolve_api_keys(&state.api_keys)?;
 
-    if gemini_key.is_empty() && openai_key.is_empty() {
+    if gemini_key.is_empty() && openai_key.is_empty() && anthropic_key.is_empty() {
         return Err("No API key configured.".to_string());
     }
 
     let result_str = game_result.as_deref().unwrap_or("unknown");
     let prompt = build_thematic_summary_prompt(&moments, &perspective, include_great_moves.unwrap_or(false), result_str, include_opportunities.unwrap_or(false));
 
-    if !gemini_key.is_empty() {
-        let client = gemini::Client::new(&gemini_key)
-            .map_err(|e| format!("Failed to initialise Gemini client: {}", e))?;
-        let agent = client.agent(gemini_model(use_pro))
-            .preamble(COACH_SYSTEM_PROMPT)
-            .build();
-        agent.prompt(&prompt).await.map_err(|e| format!("Gemini Error: {}", e))
-    } else {
-        let client = openai::Client::new(&openai_key)
-            .map_err(|e| format!("Failed to initialise OpenAI client: {}", e))?;
-        let agent = client.agent(openai::GPT_4O)
-            .preamble(COACH_SYSTEM_PROMPT)
-            .build();
-        agent.prompt(&prompt).await.map_err(|e| format!("OpenAI Error: {}", e))
-    }
+    llm_prompt(COACH_SYSTEM_PROMPT, &prompt, &state).await
 }
 
 // ── Report Persistence Commands ───────────────────────────────
@@ -842,6 +919,8 @@ fn list_reports(app: tauri::AppHandle) -> Result<Vec<SavedReportMeta>, String> {
             critical_moment_count: report.report.critical_moments.len() as u32,
             result: report.result.clone(),
             name: report.name.clone(),
+            white_player: report.white_player.clone(),
+            black_player: report.black_player.clone(),
         });
     }
 
@@ -915,6 +994,8 @@ fn check_report_exists(game_hash: String, app: tauri::AppHandle) -> Result<Optio
                 critical_moment_count: report.report.critical_moments.len() as u32,
                 result: report.result.clone(),
                 name: report.name.clone(),
+                white_player: report.white_player.clone(),
+                black_player: report.black_player.clone(),
             }));
         }
     }
@@ -953,6 +1034,7 @@ async fn run_engine_pass(
     positions: Vec<String>,
     depth: u32,
     multipv: u32,
+    state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<engine::PositionEval>, String> {
     // Bounds-check parameters — these commands are reachable from any JS in
@@ -991,12 +1073,18 @@ async fn run_engine_pass(
         }
     });
 
+    // Fresh pass → clear any previous cancellation, then hand the flag to
+    // the worker pool so `cancel_analysis` stops it between positions.
+    state.analysis_cancel.store(false, Ordering::Relaxed);
+    let cancel = state.analysis_cancel.clone();
+
     let result = engine::run_engine_pass(
         positions,
         depth,
         multipv,
         &stockfish_path,
         completed,
+        cancel,
     )
     .await;
 
@@ -1004,6 +1092,15 @@ async fn run_engine_pass(
     done.store(true, Ordering::Relaxed);
     let _ = progress_task.await;
     result
+}
+
+/// Abort an in-progress report analysis. Engine workers check the flag
+/// between positions; the frontend pipeline checks its own flag between
+/// steps and stops issuing further commands.
+#[tauri::command]
+fn cancel_analysis(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.analysis_cancel.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 // ── Lc0 Config Commands ───────────────────────────────────────
@@ -1139,6 +1236,7 @@ pub fn run() {
                 api_keys: Mutex::new(keys),
                 live_engine,
                 config: Mutex::new(config),
+                analysis_cancel: Arc::new(AtomicBool::new(false)),
             });
             Ok(())
         })
@@ -1147,7 +1245,7 @@ pub fn run() {
             get_api_keys,
             save_api_key,
             remove_api_key,
-            set_gemini_pro,
+            set_analysis_model,
             explain_critical_moment,
             generate_thematic_summary,
             save_report,
@@ -1157,6 +1255,7 @@ pub fn run() {
             rename_report,
             check_report_exists,
             run_engine_pass,
+            cancel_analysis,
             live_engine_set_fen,
             live_engine_new_game,
             live_engine_stop,
@@ -1181,3 +1280,4 @@ pub fn run() {
         }
     });
 }
+

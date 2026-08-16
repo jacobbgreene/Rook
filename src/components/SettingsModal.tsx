@@ -2,14 +2,41 @@
 import { useState } from "react";
 import { EyeIcon, EyeOffIcon } from "../icons";
 import { PopIn } from "../animate";
+import { Dropdown } from "./Dropdown";
 
 export interface ApiKeyStatus {
   gemini_set: boolean;
   gemini_hint: string;
   openai_set: boolean;
   openai_hint: string;
-  gemini_pro_enabled: boolean;
+  anthropic_set: boolean;
+  anthropic_hint: string;
+  analysis_model: string;
 }
+
+/** Mirror of the model catalog in src-tauri/src/lib.rs (provider_for_model).
+    Keep the two in sync. */
+export const ANALYSIS_MODELS: {
+  id: string;
+  label: string;
+  provider: "anthropic" | "gemini" | "openai";
+}[] = [
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — fast & affordable", provider: "anthropic" },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic" },
+  { id: "claude-opus-5", label: "Claude Opus 5", provider: "anthropic" },
+  { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash — free tier", provider: "gemini" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite — budget", provider: "gemini" },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini" },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna — budget", provider: "openai" },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai" },
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai" },
+];
+
+export const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic (Claude)",
+  gemini: "Google (Gemini)",
+  openai: "OpenAI",
+};
 
 export interface AppConfig {
   engineMode: "stockfish_only" | "hybrid";
@@ -61,27 +88,61 @@ export function ToggleRow({
   );
 }
 
-function KeySection({
-  title,
-  provider,
-  saved,
-  hint,
+function ApiKeySection({
+  apiKeyStatus,
   onSave,
   onRemove,
 }: {
-  title: string;
-  provider: string;
-  saved: boolean;
-  hint: string;
+  apiKeyStatus: ApiKeyStatus | null;
   onSave: (provider: string, key: string) => Promise<void>;
   onRemove: (provider: string) => Promise<void>;
 }) {
+  const PROVIDERS = ["anthropic", "gemini", "openai"] as const;
+  const [provider, setProvider] = useState<(typeof PROVIDERS)[number]>(
+    // Default the tab to the provider of the currently selected model.
+    () =>
+      PROVIDERS.find(
+        (p) =>
+          p ===
+          ANALYSIS_MODELS.find((m) => m.id === apiKeyStatus?.analysis_model)
+            ?.provider,
+      ) ?? "gemini",
+  );
   const [input, setInput] = useState("");
   const [show, setShow] = useState(false);
 
+  const saved =
+    provider === "anthropic"
+      ? (apiKeyStatus?.anthropic_set ?? false)
+      : provider === "gemini"
+        ? (apiKeyStatus?.gemini_set ?? false)
+        : (apiKeyStatus?.openai_set ?? false);
+  const hint =
+    provider === "anthropic"
+      ? (apiKeyStatus?.anthropic_hint ?? "")
+      : provider === "gemini"
+        ? (apiKeyStatus?.gemini_hint ?? "")
+        : (apiKeyStatus?.openai_hint ?? "");
+
   return (
     <div className="api-key-section">
-      <h4>{title}</h4>
+      <h4>API Key</h4>
+      <div className="provider-tabs">
+        {PROVIDERS.map((p) => (
+          <button
+            key={p}
+            className={`provider-tab ${provider === p ? "provider-tab-active" : ""}`}
+            onClick={() => {
+              setProvider(p);
+              setInput("");
+              setShow(false);
+            }}
+          >
+            {PROVIDER_LABELS[p]}
+            {keySet(apiKeyStatus, p) && <span className="provider-tab-dot" />}
+          </button>
+        ))}
+      </div>
       {saved ? (
         <div className="api-key-saved">
           <span className="key-hint">{hint}</span>
@@ -91,7 +152,7 @@ function KeySection({
         <div className="api-key-input-group">
           <input
             type={show ? "text" : "password"}
-            placeholder={`Enter ${title}...`}
+            placeholder={`Enter ${PROVIDER_LABELS[provider]} key...`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={async (e) => {
@@ -119,11 +180,20 @@ function KeySection({
   );
 }
 
+function keySet(status: ApiKeyStatus | null, provider: string): boolean {
+  if (!status) return false;
+  return provider === "anthropic"
+    ? status.anthropic_set
+    : provider === "gemini"
+      ? status.gemini_set
+      : status.openai_set;
+}
+
 interface SettingsModalProps {
   apiKeyStatus: ApiKeyStatus | null;
   onSaveKey: (provider: string, key: string) => Promise<void>;
   onRemoveKey: (provider: string) => Promise<void>;
-  onToggleGeminiPro: () => Promise<void>;
+  onSelectModel: (model: string) => Promise<void>;
   appConfig: AppConfig | null;
   onToggleEngineMode: () => Promise<void>;
   reportSettings: ReportSettings;
@@ -135,13 +205,20 @@ export function SettingsModal({
   apiKeyStatus,
   onSaveKey,
   onRemoveKey,
-  onToggleGeminiPro,
+  onSelectModel,
   appConfig,
   onToggleEngineMode,
   reportSettings,
   onUpdateReportSettings,
   onClose,
 }: SettingsModalProps) {
+  const selectedModel = ANALYSIS_MODELS.find(
+    (m) => m.id === apiKeyStatus?.analysis_model,
+  );
+  const selectedProviderHasKey = selectedModel
+    ? keySet(apiKeyStatus, selectedModel.provider)
+    : false;
+
   return (
     <div className="api-key-modal-overlay" onClick={onClose}>
       <PopIn className="api-key-modal" onClick={(e) => e.stopPropagation()}>
@@ -152,29 +229,34 @@ export function SettingsModal({
           </button>
         </h2>
 
-        <KeySection
-          title="Gemini API Key"
-          provider="gemini"
-          saved={apiKeyStatus?.gemini_set ?? false}
-          hint={apiKeyStatus?.gemini_hint ?? ""}
-          onSave={onSaveKey}
-          onRemove={onRemoveKey}
-        />
-
-        {apiKeyStatus?.gemini_set && (
-          <ToggleRow
-            title="Gemini 3.1 Pro Preview"
-            desc="Use Pro instead of Flash for report analysis. Slower but higher quality."
-            checked={apiKeyStatus.gemini_pro_enabled}
-            onToggle={onToggleGeminiPro}
+        <div className="api-key-section">
+          <h4>Analysis Model</h4>
+          <Dropdown
+            value={apiKeyStatus?.analysis_model ?? ""}
+            onChange={(model) => onSelectModel(model)}
+            options={(["anthropic", "gemini", "openai"] as const).map(
+              (provider) => ({
+                group: PROVIDER_LABELS[provider],
+                options: ANALYSIS_MODELS.filter(
+                  (m) => m.provider === provider,
+                ).map((m) => ({
+                  value: m.id,
+                  label: m.label,
+                  hint: keySet(apiKeyStatus, provider) ? undefined : "(no key)",
+                })),
+              }),
+            )}
           />
-        )}
+          {selectedModel && !selectedProviderHasKey && (
+            <div className="model-select-warning">
+              No {PROVIDER_LABELS[selectedModel.provider]} key saved — add one
+              below or pick a different model.
+            </div>
+          )}
+        </div>
 
-        <KeySection
-          title="OpenAI API Key"
-          provider="openai"
-          saved={apiKeyStatus?.openai_set ?? false}
-          hint={apiKeyStatus?.openai_hint ?? ""}
+        <ApiKeySection
+          apiKeyStatus={apiKeyStatus}
           onSave={onSaveKey}
           onRemove={onRemoveKey}
         />
@@ -270,18 +352,15 @@ export function SettingsModal({
         </div>
 
         <div className="api-key-info">
-          An API key unlocks the AI coach and report explanations: Gemini 3
-          Flash by default (or Gemini 3.1 Pro with the toggle above), or OpenAI
-          GPT-4o. Without a key, engine analysis still works fully. Get a free
-          Gemini key from{" "}
-          <a
-            href="https://aistudio.google.com/apikey"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#7ab3ff" }}
-          >
-            Google AI Studio
-          </a>
+          The AI coach and report explanations use the analysis model selected
+          above — Gemini 3.7 Flash by default (free via Google AI Studio). Add
+          the API key for the provider whose model you want to use; without a
+          key, engine analysis still works fully. Keys:{" "}
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" style={{ color: "#7ab3ff" }}>Anthropic</a>
+          {", "}
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" style={{ color: "#7ab3ff" }}>Google AI Studio</a>
+          {" (free tier), "}
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={{ color: "#7ab3ff" }}>OpenAI</a>
           .
         </div>
       </PopIn>

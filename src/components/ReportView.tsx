@@ -1,8 +1,8 @@
 // Dedicated report mode: board + eval bar + navigation on the left,
 // the game-wide summary and the move list with inline moment cards
 // on the right.
-import { useEffect, useLayoutEffect } from "react";
-import ReactMarkdown from "react-markdown";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { ChessMarkdown } from "./ChessMarkdown";
 import { animate, stagger } from "animejs";
 import {
   moveInfoAt,
@@ -149,7 +149,13 @@ function evalChipText(m: Moment): string {
   return `+${Math.abs(m.evalDrop).toFixed(1)}`;
 }
 
-function ProgressView({ progress }: { progress: AnalysisPhase }) {
+function ProgressView({
+  progress,
+  onCancel,
+}: {
+  progress: AnalysisPhase;
+  onCancel: () => void;
+}) {
   return (
     <div className="analysis-progress">
       {progress.phase === "engine" && (
@@ -225,6 +231,12 @@ function ProgressView({ progress }: { progress: AnalysisPhase }) {
       {progress.phase === "summary" && (
         <div className="progress-label">Generating thematic summary...</div>
       )}
+      <button
+        className="action-button progress-cancel-btn"
+        onClick={onCancel}
+      >
+        Cancel analysis
+      </button>
     </div>
   );
 }
@@ -255,13 +267,25 @@ interface ReportViewProps {
   title: string;
   perspective: "white" | "black";
   result?: string;
+  /** Player names (from PGN headers / saved report) for title highlighting. */
+  whitePlayer?: string | null;
+  blackPlayer?: string | null;
   onExitToGame: () => void;
   onCloseReport: () => void;
   onRegenerate: () => void;
   onOpenLibrary: () => void;
+  onCancelAnalysis: () => void;
   // Report data
   isLoading: boolean;
   analysisProgress: AnalysisPhase | null;
+  /** Moments classified so far — drives the toast popups by the eval bar. */
+  classifiedMoments: {
+    moveNumber: number;
+    side: string;
+    category: string;
+    moveSan: string;
+    fen: string;
+  }[];
   report: GameAnalysisReport | null;
   reportPerspective: "white" | "black";
   // Move list interaction
@@ -295,12 +319,16 @@ export function ReportView(props: ReportViewProps) {
     title,
     perspective,
     result,
+    whitePlayer,
+    blackPlayer,
     onExitToGame,
     onCloseReport,
     onRegenerate,
     onOpenLibrary,
+    onCancelAnalysis,
     isLoading,
     analysisProgress,
+    classifiedMoments,
     report,
     reportPerspective,
     mainLineHistory,
@@ -339,7 +367,39 @@ export function ReportView(props: ReportViewProps) {
     });
   }, [report]);
 
-  const renderMoves = () => {
+  // Stabilize the callbacks so the move list memo below isn't defeated by
+  // fresh function identities from App on every render.
+  const navigateRef = useRef(onNavigateToMainLineMove);
+  navigateRef.current = onNavigateToMainLineMove;
+
+  // Clicking a move chip in the summary/explanations jumps to that move on
+  // the board. Repeated SANs resolve to the first occurrence. Ref-based so
+  // the memoized move list below never captures a stale move list.
+  const sanMovesRef = useRef<string[]>([]);
+  sanMovesRef.current = mainLineSanMoves || gameSanList;
+  const navigateToSan = (san: string) => {
+    const idx = sanMovesRef.current.findIndex((s) => s === san);
+    if (idx >= 0) navigateRef.current(idx + 1);
+  };
+
+  // Moment toasts: during the LLM phase the progress event carries the FEN
+  // of the moment currently being explained — the toast for that moment
+  // pops while the coach works on it, in sync with the board. Nothing
+  // shows during the engine/Lc0 phases.
+  const llmFen =
+    isLoading && analysisProgress?.phase === "llm"
+      ? analysisProgress.fen
+      : undefined;
+  const activeToast = llmFen
+    ? classifiedMoments.find((m) => m.fen === llmFen)
+    : null;
+  const playBestLineRef = useRef(onPlayBestLine);
+  playBestLineRef.current = onPlayBestLine;
+
+  // Memoized: while freely exploring a variation the live engine flushes
+  // at 10 Hz, and this rebuilds every move chip plus a ReactMarkdown parse
+  // per moment card — only redo it when the inputs actually change.
+  const movesContent = useMemo(() => {
     if (!report) return null;
     const sanMoves = mainLineSanMoves || gameSanList;
     if (sanMoves.length === 0) return null;
@@ -349,6 +409,9 @@ export function ReportView(props: ReportViewProps) {
       momentMap.set(`${m.moveNumber}-${m.side}`, m);
     }
     const fens = mainLineHistory || gameHistory;
+    // fen → history index, built once (was indexOf per moment card)
+    const fenIndex = new Map<string, number>();
+    gameHistory.forEach((f, idx) => fenIndex.set(f, idx));
 
     const elements: React.ReactNode[] = [];
     // Group moves into rows of 3 full moves; a moment card breaks the row.
@@ -419,7 +482,7 @@ export function ReportView(props: ReportViewProps) {
         <span
           key={`move-${i}`}
           className="move-chip"
-          onClick={() => onNavigateToMainLineMove(historyIndex)}
+          onClick={() => navigateRef.current(historyIndex)}
           data-current-move={isCurrentMove ? "true" : undefined}
           style={{
             cursor: "pointer",
@@ -444,7 +507,7 @@ export function ReportView(props: ReportViewProps) {
       // Player moments + opportunities: flush row, render card, start new row
       if ((isPlayerMoment || isOpportunity) && moment) {
         flushRow(`row-before-card-${i}`);
-        const fenIdx = gameHistory.indexOf(moment.fen);
+        const fenIdx = fenIndex.get(moment.fen) ?? -1;
         const activeBestLineIdx =
           fenIdx >= 0 && isExploringVariation
             ? currentMoveIndex - fenIdx - 1
@@ -454,7 +517,7 @@ export function ReportView(props: ReportViewProps) {
             key={`card-${i}`}
             className="critical-moment-card cm-inline"
             style={{ cursor: "pointer" }}
-            onClick={() => onNavigateToMainLineMove(historyIndex)}
+            onClick={() => navigateRef.current(historyIndex)}
           >
             <div className="cm-header">
               <span className={`category-badge badge-${moment.category}`}>
@@ -507,7 +570,7 @@ export function ReportView(props: ReportViewProps) {
                       <span
                         className={`best-line-move${idx === activeBestLineIdx ? " best-line-active" : ""}`}
                         onClick={() =>
-                          onPlayBestLine(moment.fen, moment.bestLine, idx)
+                          playBestLineRef.current(moment.fen, moment.bestLine, idx)
                         }
                       >
                         {san}
@@ -517,7 +580,9 @@ export function ReportView(props: ReportViewProps) {
                 </div>
               )}
             <div className="cm-explanation">
-              <ReactMarkdown>{stripLatex(moment.llmExplanation)}</ReactMarkdown>
+              <ChessMarkdown onMoveClick={navigateToSan}>
+                {stripLatex(moment.llmExplanation)}
+              </ChessMarkdown>
             </div>
           </div>,
         );
@@ -532,7 +597,16 @@ export function ReportView(props: ReportViewProps) {
         {elements}
       </div>
     );
-  };
+  }, [
+    report,
+    mainLineSanMoves,
+    gameSanList,
+    mainLineHistory,
+    gameHistory,
+    currentMoveIndex,
+    isExploringVariation,
+    reportPerspective,
+  ]);
 
   return (
     <div className="report-view">
@@ -541,7 +615,27 @@ export function ReportView(props: ReportViewProps) {
           ← Back to game
         </button>
         <div className="report-header-title" title={title}>
-          {title}
+          {whitePlayer || blackPlayer ? (
+            <>
+              <span
+                className={
+                  perspective === "white" ? "report-player-you" : undefined
+                }
+              >
+                {whitePlayer ?? "White"}
+              </span>
+              <span className="report-player-dash"> – </span>
+              <span
+                className={
+                  perspective === "black" ? "report-player-you" : undefined
+                }
+              >
+                {blackPlayer ?? "Black"}
+              </span>
+            </>
+          ) : (
+            title
+          )}
         </div>
         <span className={`perspective-badge perspective-${perspective}`}>
           {perspective}
@@ -573,42 +667,66 @@ export function ReportView(props: ReportViewProps) {
       </PopIn>
 
       <div className="report-body">
-        <BoardSection
-          fen={fen}
-          boardOrientation={boardOrientation}
-          arrows={currentMoveIndex === 0 ? [] : arrows}
-          squareStyles={squareStyles}
-          onPieceDrop={onPieceDrop}
-          evaluation={evaluation}
-          sideToMove={sideToMove}
-          isCheckmate={isCheckmate}
-          hasGame={currentMoveIndex > 0}
-          canNavigateBack={currentMoveIndex > 0}
-          canNavigateForward={currentMoveIndex < historyLength - 1}
-          onStart={onStart}
-          onBack={onBack}
-          onForward={onForward}
-          onEnd={onEnd}
-          onFlip={onFlip}
-        >
-          {isExploringVariation && (
-            <PopIn className="back-to-main-btn" onClick={onBackToMainLine}>
-              ← Back to main line
-            </PopIn>
+        <div className="board-toast-wrap">
+          {activeToast && (
+            <div
+              key={activeToast.fen}
+              className="moment-toast"
+            >
+              <span className={`category-badge badge-${activeToast.category}`}>
+                {CATEGORY_LABEL[activeToast.category] ??
+                  activeToast.category.charAt(0).toUpperCase() +
+                    activeToast.category.slice(1)}
+              </span>
+              <span className="moment-toast-move">
+                {activeToast.moveNumber}. {activeToast.moveSan}
+              </span>
+            </div>
           )}
-        </BoardSection>
+          <BoardSection
+            fen={fen}
+            boardOrientation={boardOrientation}
+            arrows={currentMoveIndex === 0 ? [] : arrows}
+            squareStyles={squareStyles}
+            onPieceDrop={onPieceDrop}
+            evaluation={evaluation}
+            sideToMove={sideToMove}
+            isCheckmate={isCheckmate}
+            hasGame={currentMoveIndex > 0}
+            canNavigateBack={currentMoveIndex > 0}
+            canNavigateForward={currentMoveIndex < historyLength - 1}
+            onStart={onStart}
+            onBack={onBack}
+            onForward={onForward}
+            onEnd={onEnd}
+            onFlip={onFlip}
+          >
+            {isExploringVariation && (
+              <PopIn className="back-to-main-btn" onClick={onBackToMainLine}>
+                ← Back to main line
+              </PopIn>
+            )}
+            {/* The thematic summary gets its own pane under the board instead
+                of competing with the move browser for side-column height. */}
+            {!isLoading && report && (
+              <div className="report-summary report-summary-board">
+                <ChessMarkdown onMoveClick={navigateToSan}>
+                  {stripLatex(report.thematicSummary)}
+                </ChessMarkdown>
+              </div>
+            )}
+          </BoardSection>
+        </div>
 
         <div className="report-side">
           {isLoading && analysisProgress ? (
-            <ProgressView progress={analysisProgress} />
+            <ProgressView
+              progress={analysisProgress}
+              onCancel={onCancelAnalysis}
+            />
           ) : report ? (
             <>
-              <div className="report-summary">
-                <ReactMarkdown>
-                  {stripLatex(report.thematicSummary)}
-                </ReactMarkdown>
-              </div>
-              <div className="report-moves-scroll">{renderMoves()}</div>
+              <div className="report-moves-scroll">{movesContent}</div>
               {report.criticalMoments.filter(
                 (m) =>
                   m.side === reportPerspective ||
